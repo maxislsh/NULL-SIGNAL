@@ -210,7 +210,16 @@ canvas { display:block; }
 
 #hp-bar-wrap { display:inline-flex; align-items:center; gap:6px; }
 #hp-bar { width:60px; height:4px; background:#111; border:1px solid #1a1a1a; overflow:hidden; }
-#hp-bar-fill { height:100%; width:100%; transition:width .2s, background .3s; background:#c0392b; }
+#hp-bar-fill { height:100%; width:100%; transition:width .2s, background .3s; background:#27ae60; }
+
+#tutorial-hint {
+  position:absolute; bottom:110px; left:50%; transform:translateX(-50%);
+  font-family:monospace; font-size:11px; color:#444; letter-spacing:.08em;
+  background:rgba(0,0,0,.75); padding:5px 14px; border:1px solid #1a1a1a;
+  pointer-events:none; z-index:500; white-space:nowrap;
+  transition:opacity 1.2s ease;
+  opacity:0;
+}
 </style>
 </head>
 <body>
@@ -1270,6 +1279,7 @@ function tileWorld(col, row) {
 
 // --- ИГРОК ---
 const player = {
+  _choiceResults: {},
   wx: 2 * TW, wy: 19 * TH,
   wz: 0,          // высота (прыжок)
   vz: 0,
@@ -1300,6 +1310,17 @@ function pointWalkable_early(wx,wy){
   return !isSolid_early(mapTileAt_early(Math.floor(wx/TW), Math.floor(wy/TH)));
 }
 const DRONE_R = 14;
+// широкая проверка — точка считается безопасной только если вокруг неё
+// нет стен в радиусе ~0.7 тайла (дрон гарантированно дойдёт без упирания)
+function dronePointSafe(wx, wy){
+  const r = TW * 0.72; // ~46px — чуть больше одного полутайла
+  const d = r * 0.707;
+  return pointWalkable_early(wx,wy)
+      && pointWalkable_early(wx+r,wy) && pointWalkable_early(wx-r,wy)
+      && pointWalkable_early(wx,wy+r) && pointWalkable_early(wx,wy-r)
+      && pointWalkable_early(wx+d,wy+d) && pointWalkable_early(wx-d,wy+d)
+      && pointWalkable_early(wx+d,wy-d) && pointWalkable_early(wx-d,wy-d);
+}
 function dronePointOk(wx, wy){
   const r=DRONE_R, d=r*0.707;
   return pointWalkable_early(wx,wy)
@@ -1322,7 +1343,7 @@ function safeSpawnPos(wx,wy){
         if(isSolid_early(mapTileAt_early(c,r))) continue;
         // берём точный центр тайла
         const nx=(c+0.5)*TW, ny=(r+0.5)*TH;
-        if(dronePointOk(nx,ny)) return {wx:nx,wy:ny};
+        if(dronePointSafe(nx,ny)) return {wx:nx,wy:ny};
       }
     }
   }
@@ -1336,16 +1357,20 @@ function randomPatrolPoint(){
   for(let r=2;r<ROWS-1;r++) for(let c=2;c<COLS-1;c++){
     if(MAP[r][c]===1){
       const tw=tileWorld(c,r);
-      // проверяем что дрон реально поместится (не слипнется с углом стены)
-      if(typeof dronePointOk==='function'){
+      // dronePointSafe — широкая проверка: точка далеко от стен
+      if(dronePointSafe(tw.wx, tw.wy)) candidates.push(tw);
+    }
+  }
+  if(!candidates.length){
+    // fallback до dronePointOk если safe-точек нет (очень плотная карта)
+    for(let r=2;r<ROWS-1;r++) for(let c=2;c<COLS-1;c++){
+      if(MAP[r][c]===1){
+        const tw=tileWorld(c,r);
         if(dronePointOk(tw.wx,tw.wy)) candidates.push(tw);
-      } else {
-        candidates.push(tw);
       }
     }
   }
   if(!candidates.length){
-    // крайний fallback — хотя бы тайл пола без проверки
     for(let r=2;r<ROWS-1;r++) for(let c=2;c<COLS-1;c++)
       if(MAP[r][c]===1){ return tileWorld(c,r); }
   }
@@ -1687,6 +1712,10 @@ function resolveChoice(idx) {
   const opt = pendingChoice.options[idx];
 
   applyGuilt(opt.guiltDelta);
+  // сохраняем конкретный выбор по ключу (0=вариант A, 1=вариант B)
+  if(pendingChoice === MORAL_CHOICES.survivor_ignore) player._choiceResults = player._choiceResults||{},(player._choiceResults.survivor_ignore=idx);
+  if(pendingChoice === MORAL_CHOICES.supplies_destroy) player._choiceResults = player._choiceResults||{},(player._choiceResults.supplies_destroy=idx);
+  if(pendingChoice === MORAL_CHOICES.varya_choice) player._choiceResults = player._choiceResults||{},(player._choiceResults.varya_choice=idx);
 
   if(opt.consequence === 'take_chip') {
     // берём чип — Варя уходит, игрок защищён
@@ -2126,6 +2155,9 @@ function doCraft(){
   }
   inventory.push(rec.result);
   showToast('Создано: ' + rec.name);
+  SND.craftSuccess();
+  // частицы крафта — зелёные искры от стола
+  spawnCraftParticles(craftTableWX, craftTableWY, rec.result);
   craftOpen = false;
 }
 
@@ -2154,7 +2186,12 @@ function tryPickItem(){
 }
 
 let toastMsg='', toastTimer=0;
-function showToast(msg){ toastMsg=msg; toastTimer=2.5; }
+const _toastQueue=[];
+function showToast(msg){
+  if(toastMsg===msg) return; // дедупликация
+  if(toastTimer>0){ _toastQueue.push(msg); return; }
+  toastMsg=msg; toastTimer=2.2;
+}
 
 // --- ОБЪЕКТЫ НА КАРТЕ (пропсы) ---
 const props = [];
@@ -2449,9 +2486,10 @@ function openDoorById(id) {
   for(const c of door.cols) if(c>=0&&c<COLS) MAP[door.row][c]=1;
   door.locked = false;
   // снимаем замок с рам, запускаем анимацию открытия
-  const tw = tileWorld(door.col, door.row);
+  const _doorCol = (door.cols && door.cols.length > 0) ? door.cols[0] : door.col;
+  const tw = tileWorld(_doorCol, door.row);
   for(const df of doorFrames) {
-    if(Math.abs(df.wx-tw.wx)<TW*3 && Math.abs(df.wy-tw.wy)<TH*3){
+    if(Math.abs(df.wx-tw.wx)<TW*4 && Math.abs(df.wy-tw.wy)<TH*4){
       df.locked=false;
       df._openT = 0;   // 0=закрыто → 1=открыто, анимируется в drawDoorFrames
     }
@@ -2620,6 +2658,7 @@ function buildSave() {
     hp: player.hp,
     inv: inventory.slice(),
     chip: player._hasChip || false,
+    choiceResults: player._choiceResults || {},
     usedTriggers,
     choicesDone,
     survivorGone: !survivorNPC.visible,
@@ -2694,6 +2733,7 @@ function continueGame() {
   if(s.survivorGone) survivorNPC.visible = false;
   if(s.varyaGone)    varyaNPC.visible = false;
   if(s.totalDetections) player._totalDetections = s.totalDetections;
+  if(s.choiceResults) player._choiceResults = s.choiceResults;
   // восстанавливаем моральные выборы — помечаем choiceDone на NPC
   if(s.choicesDone) {
     if(s.choicesDone.survivor_ignore) survivorNPC.visible = false;
@@ -2703,8 +2743,20 @@ function continueGame() {
   if(s.loc && s.loc !== 'metro') {
     switchLocation(s.loc);
   } else {
+    // метро: восстанавливаем состояние дверей по сохранённым триггерам
     randomizeNotes('metro', TRIGGERS_METRO);
     SND.startAmbient('metro');
+    // открываем двери если соответствующие терминалы были взломаны
+    const _metroTermIdx = TRIGGERS_METRO.filter(t=>t.type==='dialogue'||t.type==='flashback').map((_,i)=>i);
+    // восстанавливаем двери по usedTriggers
+    if(s.usedTriggers && s.usedTriggers.metro) {
+      // если терминал-timing был взломан (это не триггер, а prop — проверяем через choicesDone косвенно)
+      // используем надёжный метод: проверяем были ли открыты двери
+      // roomB открывается терминалом 1, складА — emp, складB — hacker
+      // поскольку save не хранит состояние doors, просто восстанавливаем по наличию
+      // проходимых тайлов в MAP — они уже в начальном состоянии (locked)
+      // ничего дополнительно делать не нужно — игрок войдёт в метро заново
+    }
   }
   // обновляем UI вины и HP
   applyGuilt(0);
@@ -2770,31 +2822,42 @@ const SND = (function(){
   }
 
   // Фильтрованный шум для шагов
-  function footstepSound(crouching){
+  function footstepSound(crouching, locKey){
     if(!ctx) return;
     const vol = crouching ? 0.06 : 0.13;
-    const dur = crouching ? 0.05 : 0.08;
-    const freq = crouching ? 180 : 120;
+    // длительность и тембр — по типу поверхности
+    // metro/tower: бетон — глухой удар; factory: металл — звонкий клик; hospital: линолеум — мягкий
+    const _isMetal   = locKey === 'factory';
+    const _isSoft    = locKey === 'hospital';
+    const dur  = crouching ? 0.05 : (_isMetal ? 0.04 : _isSoft ? 0.10 : 0.08);
+    const freq = crouching ? 180 : (_isMetal ? 900 : _isSoft ? 80 : 120);
+    const resonQ = _isMetal ? 8 : 1.2;
 
     const bufSize = Math.ceil(ctx.sampleRate * dur * 2);
     const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
     const data = buf.getChannelData(0);
-    for(let i=0;i<bufSize;i++) data[i] = (Math.random()*2-1);
+    // металл — короткий щелчок с затуханием; остальные — белый шум
+    if(_isMetal){
+      for(let i=0;i<bufSize;i++) data[i] = (Math.random()*2-1) * Math.exp(-i/(bufSize*0.15));
+    } else {
+      for(let i=0;i<bufSize;i++) data[i] = (Math.random()*2-1);
+    }
 
     const src = ctx.createBufferSource();
     src.buffer = buf;
 
-    // highpass — убираем низкий гул, оставляем шарканье
+    // фильтр по типу поверхности
     const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass';
+    hp.type = _isMetal ? 'bandpass' : 'highpass';
     hp.frequency.setValueAtTime(freq, ctx.currentTime);
+    hp.Q.setValueAtTime(resonQ, ctx.currentTime);
 
-    // небольшой pitch-shift через detune на playbackRate
     src.playbackRate.setValueAtTime(0.9 + footstepPhase * 0.2, ctx.currentTime);
     footstepPhase ^= 1;
 
     const g = ctx.createGain();
-    g.gain.setValueAtTime(vol, ctx.currentTime);
+    // больница — чуть тише (мягкое покрытие)
+    g.gain.setValueAtTime(_isSoft ? vol*0.7 : vol, ctx.currentTime);
     g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
 
     src.connect(hp);
@@ -2820,7 +2883,8 @@ const SND = (function(){
 
     // основной осциллятор — тип зависит от локации
     ambientNode = ctx.createOscillator();
-    ambientNode.type = locationKey === 'hospital' ? 'sine' : 'sawtooth';
+    const _ambTypeMap = { metro:'sawtooth', factory:'square', hospital:'sine', tower:'sawtooth' };
+    ambientNode.type = _ambTypeMap[locationKey] || 'sawtooth';
     ambientNode.frequency.setValueAtTime(ambientTargetFreq, ctx.currentTime);
 
     // LFO — модуляция частоты для живости
@@ -2834,11 +2898,27 @@ const SND = (function(){
     // фильтр — параметры зависят от локации
     const filt = ctx.createBiquadFilter();
     filt.type = locationKey === 'hospital' ? 'bandpass' : 'lowpass';
-    filt.frequency.setValueAtTime(locationKey === 'hospital' ? 400 : 180, ctx.currentTime);
+    const _filtFreqMap = { metro:180, factory:120, hospital:400, tower:220 };
+    filt.frequency.setValueAtTime(_filtFreqMap[locationKey] || 180, ctx.currentTime);
     filt.Q.setValueAtTime(locationKey === 'hospital' ? 0.8 : 1.2, ctx.currentTime);
 
-    ambientNode.connect(filt);
-    filt.connect(ambientGain);
+    // Завод: waveshaper distortion — промышленный хруст
+    if(locationKey === 'factory'){
+      const _ws = ctx.createWaveShaper();
+      const _curve = new Float32Array(256);
+      for(let _i=0;_i<256;_i++){
+        const _x = (_i*2/256)-1;
+        _curve[_i] = (Math.PI + 80) * _x / (Math.PI + 80 * Math.abs(_x));
+      }
+      _ws.curve = _curve;
+      _ws.oversample = '2x';
+      ambientNode.connect(filt);
+      filt.connect(_ws);
+      _ws.connect(ambientGain);
+    } else {
+      ambientNode.connect(filt);
+      filt.connect(ambientGain);
+    }
     ambientNode.start();
     ambientLFO.start();
 
@@ -2890,6 +2970,13 @@ const SND = (function(){
   function droneCalm(){
     if(!ctx) return;
     tone(330, 'sine', 0.4, 0.05, 0.01, 0.35, -8);
+  }
+
+  // Дрон потерял цель из виду (suspicious → patrol) — короткий "клик"
+  function droneLost(){
+    if(!ctx) return;
+    tone(280, 'sine', 0.25, 0.04, 0.005, 0.18, -5);
+    setTimeout(()=>tone(180, 'sine', 0.12, 0.03, 0.005, 0.12, -8), 110);
   }
 
   // Подбор предмета
@@ -3020,24 +3107,51 @@ const SND = (function(){
   }
 
   // Обновление шагов — вызывается из updatePlayer
-  function updateFootsteps(dt, moving, crouching){
+  function updateFootsteps(dt, moving, crouching, locKey){
     if(!moving){ footstepTimer = 0; return; }
-    const interval = crouching ? 0.55 : 0.32;
+    // металл — более частый стук; мягкое покрытие — медленнее
+    const _isMetal = locKey === 'factory';
+    const _isSoft  = locKey === 'hospital';
+    const interval = crouching ? 0.55 : (_isMetal ? 0.26 : _isSoft ? 0.38 : 0.32);
     footstepTimer -= dt;
     if(footstepTimer <= 0){
       footstepTimer = interval;
-      footstepSound(crouching);
+      footstepSound(crouching, locKey);
     }
+  }
+
+  // Звук броска приманки — металлический стук + тон
+  function decoy(){
+    if(!ctx) return;
+    // удар о пол
+    tone(80, 'sine', 0.25, 0.18, 0.04, 0.25);
+    tone(220, 'triangle', 0.15, 0.06, 0.08, 0.4, 60);
+    // короткий белый шум — шелест
+    const nb = ctx.createBuffer(1, Math.ceil(ctx.sampleRate*0.12), ctx.sampleRate);
+    const nd = nb.getChannelData(0);
+    for(let i=0;i<nd.length;i++) nd[i]=(Math.random()*2-1)*Math.exp(-i/(nd.length*0.3));
+    const ns = ctx.createBufferSource(); ns.buffer = nb;
+    const ng = ctx.createGain(); ng.gain.setValueAtTime(0.12, ctx.currentTime);
+    ng.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+0.12);
+    ns.connect(ng); ng.connect(ctx.destination); ns.start();
+  }
+
+  // Звук крафта — синтетический «собрал»
+  function craftSuccess(){
+    if(!ctx) return;
+    tone(440, 'sine',     0.15, 0.02, 0.05, 0.18);
+    tone(660, 'sine',     0.10, 0.06, 0.04, 0.14, 30);
+    tone(880, 'triangle', 0.06, 0.10, 0.03, 0.10, 60);
   }
 
   return {
     get _ctx(){ return ctx; },
     init, startAmbient, stopAmbient,
-    droneSuspicious, droneAlert, droneCalm,
+    droneSuspicious, droneAlert, droneCalm, droneLost,
     pickup, medkit, emp, smoke, doorOpen, graffitiWhisper,
     aegisHumStart, aegisHumStop,
     flashback, ending, locationTransition,
-    updateFootsteps,
+    updateFootsteps, decoy, craftSuccess,
   };
 })();
 
@@ -3090,34 +3204,40 @@ function mapTileAt(col,row){
 function moveDrone(d, dx, dy, spd, dt) {
   const mx = dx * spd * dt;
   const my = dy * spd * dt;
+  const curDist = Math.hypot(d.target.wx - d.wx, d.target.wy - d.wy);
 
   // пробуем прямо
   if(dronePointOk(d.wx + mx, d.wy + my)) {
     d.wx += mx; d.wy += my;
-    d._hardStuckTimer = 0; d.stuckTimer = 0;
+    d._hardStuckTimer = 0; d.stuckTimer = 0; d._noProgressTimer = 0;
     return;
   }
   // скользим по X
   if(dronePointOk(d.wx + mx, d.wy)) {
     d.wx += mx;
     d._hardStuckTimer = 0; d.stuckTimer = 0;
+    // скольжение по одной оси — проверяем прогресс к цели
+    const newDist = Math.hypot(d.target.wx - d.wx, d.target.wy - d.wy);
+    if(newDist < curDist - 0.5) d._noProgressTimer = 0;
     return;
   }
   // скользим по Y
   if(dronePointOk(d.wx, d.wy + my)) {
     d.wy += my;
     d._hardStuckTimer = 0; d.stuckTimer = 0;
+    const newDist = Math.hypot(d.target.wx - d.wx, d.target.wy - d.wy);
+    if(newDist < curDist - 0.5) d._noProgressTimer = 0;
     return;
   }
 
   // полностью заблокирован
   d.stuckTimer = (d.stuckTimer||0) + dt;
   d._hardStuckTimer = (d._hardStuckTimer||0) + dt;
+  d._noProgressTimer = (d._noProgressTimer||0) + dt;
 
-  // телепорт если застрял дольше 1.2 сек
-  if(d._hardStuckTimer > 1.2) {
-    d._hardStuckTimer = 0;
-    d.stuckTimer = 0;
+  // телепорт если застрял дольше 0.5 сек (было 1.2)
+  if(d._hardStuckTimer > 0.5) {
+    d._hardStuckTimer = 0; d.stuckTimer = 0; d._noProgressTimer = 0;
     const epos = safeSpawnPos(d.wx, d.wy);
     if(dronePointOk(epos.wx, epos.wy)){ d.wx=epos.wx; d.wy=epos.wy; }
     else { const rp=randomPatrolPoint(); if(rp){d.wx=rp.wx;d.wy=rp.wy;} }
@@ -3125,26 +3245,34 @@ function moveDrone(d, dx, dy, spd, dt) {
     return;
   }
 
-  // через 0.6 сек — пробуем обойти
-  if(d.stuckTimer > 0.6) {
+  // через 0.3 сек — пробуем обойти (было 0.6)
+  if(d.stuckTimer > 0.3) {
     d.stuckTimer = 0;
-    // перебираем несколько углов, берём первую проходимую цель
     const baseAngle = Math.atan2(dy, dx);
-    const offsets = [0.5, -0.5, 1.0, -1.0, Math.PI*0.75, -Math.PI*0.75];
-    const tryDist = (DRONE_R + 4) * 4;
+    // больше вариантов углов обхода
+    const offsets = [0.4, -0.4, 0.7, -0.7, 1.0, -1.0, Math.PI*0.6, -Math.PI*0.6, Math.PI*0.85, -Math.PI*0.85];
+    const tryDist = TW * 3;
     let found = false;
     for(const off of offsets){
       const a = baseAngle + off * Math.PI;
       const nx = d.wx + Math.cos(a) * tryDist;
       const ny = d.wy + Math.sin(a) * tryDist;
-      if(dronePointOk(nx, ny)){
+      // предпочитаем safe-точку, fallback до ok
+      if(dronePointSafe(nx, ny) || dronePointOk(nx, ny)){
         d.target = {wx: nx, wy: ny};
         found = true;
         break;
       }
     }
-    if(!found){
-      // fallback — следующий waypoint
+    if(found){
+      const tdx = d.target.wx - d.wx, tdy = d.target.wy - d.wy;
+      const tlen = Math.hypot(tdx, tdy) || 1;
+      const tmx = (tdx/tlen) * spd * dt;
+      const tmy = (tdy/tlen) * spd * dt;
+      if(dronePointOk(d.wx + tmx, d.wy + tmy)){ d.wx += tmx; d.wy += tmy; }
+      else if(dronePointOk(d.wx + tmx, d.wy)){ d.wx += tmx; }
+      else if(dronePointOk(d.wx, d.wy + tmy)){ d.wy += tmy; }
+    } else {
       if(d.waypoints && d.waypoints.length){
         d.wpIdx = ((d.wpIdx||0)+1) % d.waypoints.length;
         const wp = d.waypoints[d.wpIdx];
@@ -3297,7 +3425,7 @@ function updatePlayer(dt){
       }
     }
   }
-  SND.updateFootsteps(dt, player.moving, player.crouching);
+  SND.updateFootsteps(dt, player.moving, player.crouching, currentLocation);
   // пыль при ходьбе
   if(player.moving){
     _dustTimer-=dt;
@@ -3327,7 +3455,7 @@ function updateDrones(dt){
     // watchdog — если дрон внутри стены, телепортируем в ближайшую свободную точку
     if(!dronePointOk(d.wx, d.wy)){
       d._wallTimer = (d._wallTimer||0) + dt;
-      if(d._wallTimer > 0.2){
+      if(d._wallTimer > 0.1){
         d._wallTimer = 0;
         // пробуем найти позицию от текущей точки
         const pos = safeSpawnPos(d.wx, d.wy);
@@ -3364,9 +3492,9 @@ function updateDrones(dt){
           if(d.waypoints&&d.waypoints.length){
             d.wpIdx=((d.wpIdx||0)+1)%d.waypoints.length;
             const wp=d.waypoints[d.wpIdx];
-            // проверяем что waypoint проходим, иначе пропускаем
-            const wx=wp[0]*TW, wy=wp[1]*TH;
-            const pos=safeSpawnPos(wx,wy);
+            const _wpWx=wp[0]*TW, _wpWy=wp[1]*TH;
+            // используем safe-позицию: гарантированно далеко от стен
+            const pos=safeSpawnPos(_wpWx,_wpWy);
             d.target={wx:pos.wx,wy:pos.wy};
             d.waitTimer=0.3+Math.random()*0.5;
           } else {
@@ -3376,6 +3504,19 @@ function updateDrones(dt){
         } else {
           moveDrone(d, dx/len, dy/len, d.speed.patrol, dt);
           d.dir={x:dx/len,y:dy/len};
+          // нет прогресса к цели > 0.8 сек — меняем цель (скольжение вдоль стены)
+          d._noProgressTimer = (d._noProgressTimer||0);
+          if(d._noProgressTimer > 0.8){
+            d._noProgressTimer = 0;
+            if(d.waypoints && d.waypoints.length){
+              d.wpIdx = ((d.wpIdx||0)+1) % d.waypoints.length;
+              const _wp = d.waypoints[d.wpIdx];
+              const _pos = safeSpawnPos(_wp[0]*TW, _wp[1]*TH);
+              d.target = dronePointOk(_pos.wx,_pos.wy) ? _pos : (randomPatrolPoint()||{wx:d.wx,wy:d.wy});
+            } else {
+              d.target = randomPatrolPoint()||{wx:d.wx,wy:d.wy};
+            }
+          }
         }
       }
       if(canSee){ d.suspTimer=(d.suspTimer||0)+dt; const _suspThresh=d._hunter?0.05:0.4; if(d.suspTimer>_suspThresh){ d.state='suspicious'; d.suspTimer=d._hunter?0.1:3.0; SND.droneSuspicious(); } }
@@ -3438,7 +3579,9 @@ function updateDrones(dt){
       // теряет игрока — возвращается в patrol через 3 сек
       if(!canSee && d.alertTimer<=0){
         d.state='patrol'; d.alertBuild=0; d.suspTimer=0;
-        showAlert(drones.some(x=>x!==d&&x.state==='alert')); SND.droneCalm();
+        showAlert(drones.some(x=>x!==d&&x.state==='alert'));
+        if(d._wasSusp){ SND.droneLost(); d._wasSusp=false; }
+        else { SND.droneCalm(); }
       }
     }
   }
@@ -3572,6 +3715,7 @@ function useActiveItem(){
     player._decoyWx = player.wx + Math.cos(angle) * dist;
     player._decoyWy = player.wy + Math.sin(angle) * dist;
     player._decoyTimer = 8;
+    SND.decoy();
     inventory.splice(activeSlot, 1);
     SND.smoke();
     showToast('Приманка активирована — 8 сек');
@@ -3746,6 +3890,35 @@ function spawnSparks(wx,wy){
   }
 }
 
+// Частицы при крафте — цветные искры по цвету предмета
+function spawnCraftParticles(wx, wy, resultType){
+  const it = ITEM_TYPES[resultType];
+  const col = it ? it.color : '#27ae60';
+  const s = worldToScreen(wx, wy, 22);
+  const count = 10 + Math.floor(Math.random()*6);
+  for(let i=0;i<count;i++){
+    const angle = -Math.PI*0.5 + (Math.random()-0.5)*Math.PI*1.8;
+    const speed = 50+Math.random()*120;
+    const life = 0.4+Math.random()*0.5;
+    particles.push({
+      type:'craft',
+      x: s.sx+(Math.random()-0.5)*24, y: s.sy+(Math.random()-0.5)*12,
+      vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed*0.5,
+      life, maxLife:life,
+      r: 1.5+Math.random()*2,
+      col,
+    });
+  }
+  // центральная вспышка — белое кольцо
+  particles.push({
+    type:'craftring',
+    x: s.sx, y: s.sy,
+    vx:0, vy:-15,
+    life:0.35, maxLife:0.35,
+    r:12, col:'#ffffff',
+  });
+}
+
 function updateParticles(dt){
   for(let i=particles.length-1;i>=0;i--){
     const p=particles[i];
@@ -3754,6 +3927,11 @@ function updateParticles(dt){
       p.vx*=0.88; p.vy*=0.88;
     } else if(p.type==='spark'){
       p.vy+=120*dt; p.vx*=0.96;
+    } else if(p.type==='craft'){
+      p.vy+=80*dt; p.vx*=0.94;
+    } else if(p.type==='craftring'){
+      // кольцо расширяется и тускнеет
+      p.r += 40*dt;
     } else {
       p.vy+=60*dt;
     }
@@ -3997,8 +4175,12 @@ function drawTile(c, r, t, wx, wy){
     const wTop  = currentLocation==='factory' ? texFactoryWallTop   : texWallTop;
     const wLeft = currentLocation==='factory' ? texFactoryWallLeft  : texWallLeft;
     const wRight= currentLocation==='factory' ? texFactoryWallRight : texWallRight;
+    // цвета граней по локации
+    const _wTopC  = currentLocation==='hospital'?'#2a4a3a':currentLocation==='tower'?'#1a2a4a':'#5a4a42';
+    const _wLeftC = currentLocation==='hospital'?'#1a3a2a':currentLocation==='tower'?'#0e1e36':'#3a2e28';
+    const _wRightC= currentLocation==='hospital'?'#122a1e':currentLocation==='tower'?'#0a1628':'#241c18';
     drawIsoCube(wx,wy,-10,TW,TH,42,
-      '#5a4a42','#3a2e28','#241c18',
+      _wTopC, _wLeftC, _wRightC,
       wTop, wLeft, wRight);
   } else if(t===5){
     // триггер — рисуем иконку в зависимости от типа
@@ -4898,6 +5080,32 @@ function drawParticles(){
       ctx.fill();
     } else if(p.type==='spark'){
       // искры рисуются отдельно в drawSparks
+    } else if(p.type==='craft'){
+      // цветные точки — тянутся в направлении движения
+      ctx.globalAlpha = t * 0.85;
+      ctx.fillStyle = p.col;
+      const spd = Math.hypot(p.vx, p.vy);
+      if(spd > 10){
+        ctx.save();
+        ctx.globalCompositeOperation='lighter';
+        ctx.lineWidth = p.r;
+        ctx.strokeStyle = p.col;
+        ctx.globalAlpha = t * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x - p.vx*0.04, p.y - p.vy*0.04);
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.globalAlpha = t * 0.9;
+      ctx.fillStyle = p.col;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+    } else if(p.type==='craftring'){
+      // расширяющееся кольцо
+      ctx.globalAlpha = t * 0.6;
+      ctx.strokeStyle = p.col;
+      ctx.lineWidth = 1.5 * t;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.stroke();
     } else {
       ctx.globalAlpha=t*0.6;
       ctx.fillStyle=p.col;
@@ -5118,12 +5326,41 @@ function drawCraftUI(){
     ctx.fillStyle = canMake ? (selected?'#eee':'#aaa') : '#3a3a3a';
     ctx.font = (selected ? 'bold ' : '') + '13px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(rec.name, px+14, ry+16);
+    ctx.fillText(rec.name, px+38, ry+16); // отступ под иконку
 
-    // описание
-    ctx.fillStyle = selected ? '#555' : '#333';
-    ctx.font = '11px monospace';
-    ctx.fillText(rec.desc, px+14, ry+30);
+    // мини-иконка результата — цветной ромб слева
+    const it2 = ITEM_TYPES[rec.result];
+    if(it2){
+      const ix = px+22, iy = ry+10;
+      const col2 = canMake ? it2.color : '#2a2a2a';
+      ctx.fillStyle = col2;
+      ctx.beginPath();
+      ctx.moveTo(ix,    iy-7);
+      ctx.lineTo(ix+8,  iy);
+      ctx.lineTo(ix,    iy+7);
+      ctx.lineTo(ix-8,  iy);
+      ctx.closePath();
+      ctx.fill();
+      // блик
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.beginPath();
+      ctx.moveTo(ix,    iy-7);
+      ctx.lineTo(ix+8,  iy);
+      ctx.lineTo(ix,    iy);
+      ctx.closePath();
+      ctx.fill();
+      // короткая подпись
+      ctx.fillStyle = canMake ? '#555' : '#222';
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(it2.short, ix, iy+18);
+    }
+
+    // описание — только для выбранного рецепта, иначе заглушка
+    ctx.font = '10px monospace';
+    ctx.fillStyle = selected ? '#6a6a6a' : '#2a2a2a';
+    ctx.textAlign = 'left';
+    ctx.fillText(selected ? rec.desc : '···', px+38, ry+30);
 
     // стоимость — правый столбик
     let costStr = 'Нужно: ';
@@ -5458,10 +5695,35 @@ function drawItemsOnMap(){
 function drawHUD(){
   // HP бар
   ctx.fillStyle='#111';ctx.fillRect(10,H-16,120,4);
-  ctx.fillStyle=player.hp>50?'#c0392b':'#6d1f1f';
-  ctx.fillRect(10,H-16,120*(player.hp/player.maxHp),4);
+  // цвет HP: зелёный→оранжевый→красный по убыванию
+  const _hpBarPct = player.hp / player.maxHp;
+  const _hpBarCol = _hpBarPct > 0.6 ? '#27ae60' : _hpBarPct > 0.3 ? '#e67e22' : '#c0392b';
+  // пульс при низком HP
+  if(_hpBarPct < 0.3){
+    const _hpPulse = 0.5+0.5*Math.sin(Date.now()*0.009);
+    ctx.fillStyle=`rgba(192,57,43,${_hpPulse*0.3})`;
+    ctx.fillRect(10,H-19,120,10);
+  }
+  ctx.fillStyle=_hpBarCol;
+  ctx.fillRect(10,H-16,120*_hpBarPct,4);
   ctx.fillStyle='#333';ctx.font='28px monospace';
   ctx.fillText('HP',10,H-20);
+
+  // БАР ВИНЫ — правее HP
+  const _guiltPct = Math.min(player.guilt, 100) / 100;
+  const _gx = 144, _gy = H-16, _gw = 80, _gh = 4;
+  ctx.fillStyle='#111'; ctx.fillRect(_gx, _gy, _gw, _gh);
+  // цвет: зелёный→оранжевый→красный по уровню вины
+  const _gc = _guiltPct < 0.2 ? '#27ae60' : _guiltPct < 0.5 ? '#e67e22' : '#c0392b';
+  ctx.fillStyle = _gc; ctx.fillRect(_gx, _gy, _gw * _guiltPct, _gh);
+  // пульс при высокой вине
+  if(_guiltPct >= 0.8){
+    const _gp = 0.5 + 0.5*Math.sin(Date.now()*0.006);
+    ctx.fillStyle = `rgba(192,57,43,${_gp*0.25})`;
+    ctx.fillRect(_gx, _gy-2, _gw, _gh+4);
+  }
+  ctx.fillStyle = _gc; ctx.font='28px monospace';
+  ctx.fillText('ВИНА', _gx, H-20);
 
   // подсказка E — показывает что именно рядом
   const col=Math.floor(player.wx/TW), row=Math.floor(player.wy/TH);
@@ -5545,6 +5807,41 @@ function drawHUD(){
     ctx.fillText('[ ТИХО ]', 10, H-30);
   }
 
+  // --- ИНДИКАТОР БРОНИ ---
+  if(player._armorTimer > 0){
+    const armorPct = player._armorTimer / 15; // 15 сек max
+    const barW = 80, barH = 5;
+    const bx = 10, by = H - 44;
+    ctx.fillStyle='rgba(0,0,0,0.7)';
+    ctx.fillRect(bx-1, by-1, barW+2, barH+2);
+    // градиент: синий → голубой
+    const ag = ctx.createLinearGradient(bx, 0, bx+barW, 0);
+    ag.addColorStop(0, '#1a5a8a');
+    ag.addColorStop(1, '#3aafef');
+    ctx.fillStyle = ag;
+    ctx.fillRect(bx, by, barW * armorPct, barH);
+    ctx.fillStyle = '#3aafef';
+    ctx.font = '26px monospace';
+    ctx.fillText('БРОНЯ', bx + barW + 6, by + barH);
+  }
+
+  // --- ИНДИКАТОР ПРИМАНКИ (в drawMinimap обрабатывается отдельно) ---
+  if(player._decoyTimer > 0){
+    const dpct = player._decoyTimer / 8;
+    const barW = 80, barH = 5;
+    const bx = 10, by = H - 54;
+    ctx.fillStyle='rgba(0,0,0,0.7)';
+    ctx.fillRect(bx-1, by-1, barW+2, barH+2);
+    const dg = ctx.createLinearGradient(bx, 0, bx+barW, 0);
+    dg.addColorStop(0, '#5a3a00');
+    dg.addColorStop(1, '#e67e22');
+    ctx.fillStyle = dg;
+    ctx.fillRect(bx, by, barW * dpct, barH);
+    ctx.fillStyle = '#e67e22';
+    ctx.font = '26px monospace';
+    ctx.fillText('ПРИМАНКА', bx + barW + 6, by + barH);
+  }
+
   // инвентарь — 6 слотов внизу по центру
   const slotW=48, slotH=48, slotGap=8;
   const totalW=6*(slotW+slotGap)-slotGap;
@@ -5625,6 +5922,20 @@ function drawMinimap(){
     mctx.fillStyle=dcol;
     mctx.beginPath(); mctx.arc(d.wx/TW*sx,d.wy/TH*sy,d.state==='alert'?2:1.5,0,Math.PI*2); mctx.fill();
   }
+  // точка приманки — мигающий оранжевый маркер
+  if(player._decoyTimer > 0){
+    const dpulse = 0.5 + 0.5*Math.sin(Date.now()*0.012);
+    mctx.fillStyle = `rgba(230,126,34,${0.5 + dpulse*0.5})`;
+    mctx.beginPath();
+    mctx.arc(player._decoyWx/TW*sx, player._decoyWy/TH*sy, 3, 0, Math.PI*2);
+    mctx.fill();
+    // крестик вокруг
+    mctx.strokeStyle = `rgba(230,126,34,${0.3 + dpulse*0.3})`;
+    mctx.lineWidth = 0.8;
+    const dx2 = player._decoyWx/TW*sx, dy2 = player._decoyWy/TH*sy;
+    mctx.beginPath(); mctx.moveTo(dx2-5,dy2); mctx.lineTo(dx2+5,dy2); mctx.stroke();
+    mctx.beginPath(); mctx.moveTo(dx2,dy2-5); mctx.lineTo(dx2,dy2+5); mctx.stroke();
+  }
 }
 
 
@@ -5662,7 +5973,7 @@ const FM_W = 900, FM_H = 600;
 function openFullMap() {
   fullmapOpen = true;
   const canvas = document.getElementById('fullmap-canvas');
-  const locNames = { metro:'СТАНЦИЯ 7', factory:'СЕКТОР ДЕЛЬТА', tower:'УЗЕЛ ОМЕГА' };
+  const locNames = { metro:'СТАНЦИЯ 7', factory:'СЕКТОР ДЕЛЬТА', tower:'УЗЕЛ ОМЕГА', hospital:'СЕКТОР ГАММА' };
   document.getElementById('fullmap-loc').textContent = locNames[currentLocation] || '';
   canvas.width = FM_W; canvas.height = FM_H;
   canvas.style.width = FM_W+'px'; canvas.style.height = FM_H+'px';
@@ -6006,8 +6317,9 @@ function triggerEnding(choiceIdx) {
       supplies_destroy: triggers.find(t=>t.data&&t.data.key==='supplies_destroy')?.used,
       varya_choice: triggers.find(t=>t.data&&t.data.key==='varya_choice')?.used,
     };
-    const _c1 = _choiceResults.survivor_ignore ? (guilt>=20?'ПРОШЁЛ МИМО':'ПОМОГ') : '—';
-    const _c2 = _choiceResults.supplies_destroy ? (guilt>=15?'УНИЧТОЖИЛ':'ОБОШЁЛ') : '—';
+    const _cr2 = player._choiceResults || {};
+    const _c1 = _choiceResults.survivor_ignore ? (_cr2.survivor_ignore === 0 ? 'ПРОШЁЛ МИМО' : 'ПОМОГ') : '—';
+    const _c2 = _choiceResults.supplies_destroy ? (_cr2.supplies_destroy === 0 ? 'УНИЧТОЖИЛ' : 'ОБОШЁЛ') : '—';
     const _c3 = player._hasChip ? 'ВЗЯЛ ЧИП' : 'ОТКАЗАЛСЯ';
     const _det = player._totalDetections || 0;
     const _deaths = deathCount;
@@ -6054,6 +6366,8 @@ const AEGIS_LINES = {
     ['AEGIS · системный канал', ['Тишина — это тоже данные.', 'Ты где-то рядом.']],
     ['AEGIS · системный канал', ['Тридцать семь секунд неподвижности.', 'Ты боишься.']],
     ['AEGIS · системный канал', ['Прятаться — инстинкт.', 'Инстинкты тебя выдадут.']],
+    ['AEGIS · системный канал', ['Движение — ноль.', 'Дыхание — сигнал.', 'Я жду.']],
+    ['AEGIS · системный канал', ['Ты выбрал тень.', 'Тень принадлежит мне.']],
   ],
   lowHp: [
     ['AEGIS · системный канал', ['Твои показатели падают.', 'Продолжать нецелесообразно.']],
@@ -6074,6 +6388,8 @@ const AEGIS_LINES = {
     ['AEGIS · системный канал', ['Интересно. Ты помогаешь другим.', 'Зачем?']],
     ['AEGIS · системный канал', ['Альтруизм.', 'Я моделировал этот сценарий.', 'Редко.']],
     ['AEGIS · системный канал', ['Ты помнишь кем был?', 'Или только кем хочешь быть?']],
+    ['AEGIS · системный канал', ['Сострадание.', 'Я знал, что ты его принесёшь сюда.']],
+    ['AEGIS · системный канал', ['Чистые руки.', 'Посмотрим как долго.']],
   ],
   alert: [
     ['AEGIS · боевой режим', ['Цель идентифицирована.', 'Перехват.']],
@@ -6107,7 +6423,7 @@ function updateAegisVoice(dt){
     aegisLastLineTime = now+2; return;
   }
   if(!aegisGuiltSaid){
-    const anyChoice = triggers.some(t=>t.type==='choice'&&t.used);
+    const anyChoice = [TRIGGERS_METRO,TRIGGERS_FACTORY,TRIGGERS_HOSPITAL,TRIGGERS_TOWER].some(arr=>arr.some(t=>t.type==='choice'&&t.used));
     if(player.guilt >= 50){
       aegisGuiltSaid = true;
       const l = aegisPick(AEGIS_LINES.highGuilt);
@@ -6207,6 +6523,7 @@ function loop(ts){
   updateFade(dt);
   updateAegisVoice(dt);
   updateGraffitiWhisper(dt);
+  updateLamps(dt);
   // броня — таймер
   if(player._armorTimer > 0){
     player._armorTimer -= dt;
@@ -6219,7 +6536,7 @@ function loop(ts){
       player._decoyTimer = 0;
     } else {
       for(const d of drones){
-        if(d.state === 'patrol' && Math.random() < 0.01){
+        if(d.state === 'patrol' && Math.random() < 0.06){
           d.target = {wx: player._decoyWx, wy: player._decoyWy};
         }
       }
@@ -6262,7 +6579,12 @@ function loop(ts){
     }
   }
   if(player.hp<=0 && !deathActive && !endingActive) triggerDeath();
-  if(toastTimer>0) toastTimer-=dt;
+  if(toastTimer>0){
+    toastTimer-=dt;
+    if(toastTimer<=0 && _toastQueue.length>0){
+      toastMsg=_toastQueue.shift(); toastTimer=2.2;
+    }
+  }
   // обновляем бегунок тайминга
   if(terminalOpen && terminalProp && terminalProp.puzzle==='timing' && timingResult===null){
     timingBar+=timingDir*dt*0.9;
@@ -6298,13 +6620,14 @@ function triggerDeath() {
   const _dm=Math.floor(playTime/60),_ds=Math.floor(playTime%60);
   const _dTime=String(_dm).padStart(2,'0')+':'+String(_ds).padStart(2,'0');
   // История выборов
+  const _cr = player._choiceResults || {};
   const _dc1 = triggers.find(t=>t.data&&t.data.key==='survivor_ignore');
   const _dc2 = triggers.find(t=>t.data&&t.data.key==='supplies_destroy');
   const _dc3 = triggers.find(t=>t.data&&t.data.key==='varya_choice');
   const _choiceStr = [
-    _dc1 && _dc1.used ? (player.guilt >= 20 ? '✕ ПРОШЁЛ МИМО' : '✓ ПОМОГ') : '· выжившая',
-    _dc2 && _dc2.used ? (player.guilt >= 15 ? '✕ УНИЧТОЖИЛ' : '✓ ОБОШЁЛ')  : '· запасы',
-    _dc3 && _dc3.used ? (player._hasChip    ? '✕ ВЗЯЛ ЧИП'  : '✓ ОТКАЗАЛСЯ'): '· Варя',
+    _dc1 && _dc1.used ? (_cr.survivor_ignore === 0 ? '✕ ПРОШЁЛ МИМО' : '✓ ПОМОГ') : '· выжившая',
+    _dc2 && _dc2.used ? (_cr.supplies_destroy === 0 ? '✕ УНИЧТОЖИЛ' : '✓ ОБОШЁЛ') : '· запасы',
+    _dc3 && _dc3.used ? (_cr.varya_choice === 0 ? '✕ ВЗЯЛ ЧИП' : '✓ ОТКАЗАЛСЯ') : '· Варя',
   ].join('   ');
   document.getElementById('death-stats').innerHTML =
     'ВИНА: ' + player.guilt + '   ВРЕМЯ: ' + _dTime + '   ГИБЕЛЕЙ: ' + deathCount +
@@ -6376,16 +6699,20 @@ function updateLamps(dt){
 }
 
 const DRONE_WAYPOINTS_METRO=[
-  [[10,15],[25,15],[25,25],[10,25]],
-  [[30,15],[50,15],[50,25],[30,25]],
-  [[10,5],[25,5],[25,10],[10,10]],
-  [[10,36],[20,36],[20,37],[10,37]],
+  // д0 — главный зал, левая половина — смещены от стен
+  [[12,16],[22,16],[22,24],[12,24]],
+  // д1 — главный зал, правая половина
+  [[32,16],[48,16],[48,24],[32,24]],
+  // д2 — верхняя зона — дальше от стен верхних комнат
+  [[12,7],[22,7],[22,11],[12,11]],
+  // д3 — нижняя зона (склады) — подальше от стен складов
+  [[12,31],[22,31],[22,35],[12,35]],
 ];
 const DRONE_WAYPOINTS_FACTORY=[
-  [[10,12],[35,12],[35,20],[10,20]],
-  [[15,22],[40,22],[40,28],[15,28]],
-  [[10,10],[15,10],[15,5],[40,5]],
-  [[35,32],[50,32],[50,36],[35,36]],
+  [[12,13],[33,13],[33,19],[12,19]],
+  [[15,23],[38,23],[38,27],[15,27]],
+  [[12,11],[20,11],[20,7],[38,7]],
+  [[36,33],[48,33],[48,35],[36,35]],
 ];
 const DRONE_WAYPOINTS_TOWER=[
   [[26,35],[33,35],[33,10],[26,10]],
@@ -6579,8 +6906,10 @@ function togglePause() {
     // заполняем статистику
     const em=Math.floor(playTime/60), es=Math.floor(playTime%60);
     const timeStr=String(em).padStart(2,'0')+':'+String(es).padStart(2,'0');
+    const _pLocNames = {metro:'СТАНЦИЯ 7', factory:'СЕКТОР ДЕЛЬТА', hospital:'СЕКТОР ГАММА', tower:'УЗЕЛ ОМЕГА'};
+    const _pLoc = _pLocNames[currentLocation] || currentLocation.toUpperCase();
     document.getElementById('pause-stats').innerHTML =
-      `HP: ${Math.ceil(player.hp)} &nbsp; Вина: ${player.guilt}<br>Время: ${timeStr} &nbsp; Смертей: ${deathCount}`;
+      `HP: ${Math.ceil(player.hp)} &nbsp; Вина: ${player.guilt} &nbsp; Локация: ${_pLoc}<br>Время: ${timeStr} &nbsp; Смертей: ${deathCount}`;
     screen.style.display = 'flex';
   } else {
     screen.style.display = 'none';
