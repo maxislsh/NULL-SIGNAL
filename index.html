@@ -6,7 +6,7 @@
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { background:#000; margin:0; padding:0; overflow:hidden; font-family:monospace; }
-#game-wrap {
+#game-wrap{ user-select:none; -webkit-user-select:none; 
   position:relative;
   width:1600px;
   transform-origin:top left;
@@ -141,6 +141,28 @@ canvas { display:block; }
   transition:width .8s ease, background .5s;
 }
 
+#death-screen {
+  position:absolute; top:0; left:0; width:100%; height:100%;
+  background:#000; display:none; flex-direction:column;
+  align-items:center; justify-content:center; z-index:10000;
+}
+#death-hp { font-size:10px; color:#1a1a1a; letter-spacing:.25em; margin-bottom:40px; }
+#death-title { font-size:38px; color:#1a1a1a; letter-spacing:.2em; margin-bottom:28px;
+  transition: color 1.2s; }
+#death-title.visible { color:#c0392b; }
+#death-aegis { font-size:13px; color:#1a1a1a; max-width:480px; text-align:center;
+  line-height:1.9; letter-spacing:.04em; margin-bottom:28px;
+  transition: color 1.5s; white-space:pre-line; }
+#death-aegis.visible { color:#555; }
+#death-stats { font-size:10px; color:#1a1a1a; letter-spacing:.1em; line-height:2;
+  text-align:center; margin-bottom:36px; transition: color 2s; }
+#death-stats.visible { color:#2a2a2a; }
+#death-restart { font-family:monospace; font-size:11px; color:#1a1a1a; background:none;
+  border:1px solid #111; padding:10px 32px; cursor:pointer; letter-spacing:.1em;
+  opacity:0; transition: opacity 0.5s, border-color 0.3s, color 0.3s; }
+#death-restart.visible { opacity:1; }
+#death-restart:hover { border-color:#c0392b; color:#888; }
+
 #ending-screen {
   position:absolute; top:0; left:0; width:100%; height:100%;
   background:#000; display:none; flex-direction:column;
@@ -150,6 +172,10 @@ canvas { display:block; }
 #ending-title { font-size:32px; color:#c0392b; letter-spacing:.15em; margin-bottom:32px; }
 #ending-text  { font-size:13px; color:#666; max-width:560px; text-align:center; line-height:2; white-space:pre-line; margin-bottom:40px; }
 #ending-aegis { font-size:11px; color:#1a1a1a; letter-spacing:.08em; font-style:italic; margin-bottom:48px; transition: color 3s; }
+#ending-stats { font-size:10px; color:#222; letter-spacing:.12em; margin-bottom:32px; line-height:2.2; text-align:center; transition: color 4s; border-top:1px solid #111; padding-top:24px; }
+#ending-stats.visible { color:#444; }
+#ending-stats span { color:#1a1a1a; transition: color 4s; }
+#ending-stats.visible span { color:#c0392b; }
 #ending-aegis.visible { color:#555; }
 #ending-restart { font-family:monospace; font-size:11px; color:#333; background:none;
   border:1px solid #1a1a1a; padding:10px 32px; cursor:pointer; letter-spacing:.1em; }
@@ -1105,6 +1131,16 @@ const DRONES_TOWER = [
     state:'patrol', alertTimer:0, suspTimer:0, alertBuild:0,
     speed:{patrol:20, alert:50}, blinkT:0, r:10, smoked:0, waitTimer:0,
   },
+  {
+    // ОХОТНИК — переходит в alert без suspicious, быстрый, узкий конус
+    wx:20*64, wy:8*36, wz:18,
+    target:{wx:20*64,wy:8*36},
+    dir:{x:1,y:0},
+    viewAngle:38, viewDist:310,
+    state:'patrol', alertTimer:0, suspTimer:0, alertBuild:0,
+    speed:{patrol:45, alert:95}, blinkT:0, r:10, smoked:0, waitTimer:0,
+    _hunter: true, // флаг охотника — мгновенный переход в alert
+  },
 ];
 
 const DOOR_FRAMES_TOWER = [
@@ -1242,6 +1278,10 @@ const player = {
   noiseLevel: 1.0,
   hp: 100, maxHp: 100,
   guilt: 0,
+  _detectedGuilt: 0,  // накопленный guilt от обнаружений, макс 10
+  _totalDetections: 0, // всего раз обнаружен дронами
+  _armorTimer: 0,      // броня — таймер защиты
+  _decoyWx: 0, _decoyWy: 0, _decoyTimer: 0, // приманка
   dir: { x:1, y:0 },
   moving: false,
   animT: 0,
@@ -1741,12 +1781,12 @@ function applyGuilt(delta) {
   fill.style.background = `rgb(${r},${g},43)`;
 
   // AEGIS адаптивно реагирует при пороговых значениях
-  if(player.guilt >= 55 && delta > 0 && player.guilt - delta < 55) {
+  if(player.guilt >= 50 && delta > 0 && player.guilt - delta < 50) {
     setTimeout(() => startDialogue('AEGIS · системный канал', [
       'Шестьдесят процентов. Ты начинаешь понимать.',
       'Это не слабость. Это — точность.'
     ]), 1000);
-  } else if(player.guilt <= 20 && delta < 0 && player.guilt - delta > 20) {
+  } else if(player.guilt <= 15 && delta < 0 && player.guilt - delta > 15) {
     setTimeout(() => startDialogue('AEGIS · системный канал', [
       'Ты пытаешься быть хорошим человеком.',
       'Я помогу тебе вспомнить, что это значит.'
@@ -1821,14 +1861,20 @@ let activeSlot = 0; // выбранный слот 0-5
 
 // --- КРАФТ ---
 const RECIPES = [
-  { name:'Дымовая шашка', result:'smoke',  cost:{ scrap:1, chem:1 },   desc:'Блокирует обзор дрона 5 сек' },
-  { name:'EMP-граната',   result:'emp',    cost:{ scrap:2, chem:1 },   desc:'Отключает дронов 10 сек' },
-  { name:'Аптечка',       result:'medkit', cost:{ bio:1, chem:1 },     desc:'+40 HP' },
-  { name:'Взломщик',      result:'hacker', cost:{ scrap:1, bio:1 },    desc:'Ускоряет терминалы AEGIS' },
+  { name:'Дымовая шашка', result:'smoke',    cost:{ scrap:1, chem:1 },        desc:'Блокирует обзор дрона 5 сек' },
+  { name:'EMP-граната',   result:'emp',      cost:{ scrap:2, chem:1 },        desc:'Отключает дронов в радиусе 200px' },
+  { name:'Аптечка',       result:'medkit',   cost:{ bio:1, chem:1 },          desc:'+40 HP' },
+  { name:'Взломщик',      result:'hacker',   cost:{ scrap:1, bio:1 },         desc:'Открывает заперт. двери' },
+  { name:'Светошум',      result:'flashbang',cost:{ scrap:1, chem:2 },        desc:'Слепит всех дронов в радиусе 3 сек' },
+  { name:'Броня',         result:'armor',    cost:{ scrap:2, bio:1 },         desc:'-50% урона на 15 сек' },
+  { name:'Приманка',      result:'decoy',    cost:{ scrap:1, chem:1, bio:1 }, desc:'Создаёт шумовую точку на 8 сек' },
 ];
 
-ITEM_TYPES['smoke']  = { name:'Дымовая шашка', color:'#aaa',    short:'DMG' };
-ITEM_TYPES['hacker'] = { name:'Взломщик',       color:'#9b59b6', short:'HCK' };
+ITEM_TYPES['smoke']     = { name:'Дымовая шашка', color:'#aaa',    short:'DMG' };
+ITEM_TYPES['hacker']    = { name:'Взломщик',       color:'#9b59b6', short:'HCK' };
+ITEM_TYPES['flashbang'] = { name:'Светошум',        color:'#f1c40f', short:'FLB' };
+ITEM_TYPES['armor']     = { name:'Броня',           color:'#2980b9', short:'ARM' };
+ITEM_TYPES['decoy']     = { name:'Приманка',        color:'#e67e22', short:'DCY' };
 
 let craftOpen   = false;
 
@@ -2120,10 +2166,10 @@ for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
   }
 }
 
-// крафт-столы
+// крафт-столы метро
 [[36,16],[36,42]].forEach(([r,c])=>{
   const tw=tileWorld(c,r);
-  props.push({wx:tw.wx,wy:tw.wy,type:'craft'});
+  props.push({wx:tw.wx,wy:tw.wy,type:'craft',loc:'metro'});
 });
 
 // терминалы AEGIS
@@ -2233,16 +2279,44 @@ function randomizeNotes(loc, triggerArr) {
   }
   // инвалидируем кеш тайлов после изменения MAP
   _sortedTiles=null;
+  _towerFinalTriggered=false; _towerDarkBoost=0;
 }
 
 // ── ПЕРЕХОД МЕЖДУ ЛОКАЦИЯМИ ─────────────────────────────────────────────────
 function switchLocation(to) {
   SND.locationTransition();
-  const ambMap = { factory:'factory', tower:'tower', metro:'metro', hospital:'metro' };
+  const ambMap = { factory:'factory', tower:'tower', metro:'metro', hospital:'hospital' };
   setTimeout(()=>SND.startAmbient(ambMap[to]||'metro'), 800);
   currentLocation = to;
-  // сбрасываем кеш тайлов
+
+  // ── сброс всего состояния при переходе локации ──────────────────
   _sortedTiles = null;
+  _towerFinalTriggered = false; _towerDarkBoost = 0;
+
+  // камеры AEGIS — только в метро
+  cameraDrones.length = 0;
+  if(to === 'metro'){
+    addCameraDrone(15,4,Math.PI*0.3,55);
+    addCameraDrone(45,4,Math.PI*0.7,55);
+  }
+
+  // реплики AEGIS — сбрасываем флаги per-game (кроме guilt — он накапливается)
+  aegisSuspWas = false; aegisAlertWas = false;
+  aegisHidingTimer = 0; aegisLastLineTime = 0;
+  // lowHp и guilt сбрасываем чтобы сработали на новой локации
+  aegisLowHpSaid = false; aegisGuiltSaid = false;
+
+  // закрываем все открытые UI
+  if(craftOpen){    craftOpen = false; }
+  if(terminalOpen){ terminalOpen = false; document.getElementById('terminal-overlay') && (document.getElementById('terminal-overlay').style.display='none'); }
+  if(noteActive){   noteActive = false;  const no=document.getElementById('note-overlay'); if(no){no.style.opacity='0'; no.style.display='none';} }
+  if(flashbackActive){ flashbackActive=false; const fb=document.getElementById('flashback'); if(fb){fb.style.opacity='0'; fb.style.pointerEvents='none';} }
+  if(dialogueActive){ closeDialogue(); }
+  if(choiceActive){   closeChoice(); }
+
+  // сбрасываем визуальные эффекты
+  droneAlertFlash = 0; _hitFlash = 0; exitBlockFlash = 0;
+  // ─────────────────────────────────────────────────────────────────
 
   if(to === 'factory') {
     for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) MAP[r][c]=MAP_FACTORY[r][c];
@@ -2267,6 +2341,21 @@ function switchLocation(to) {
     for(let i=0;i<MAX_ITEMS;i++) spawnItem();
     document.querySelector('#hud').style.borderColor = '#7a3800';
     document.getElementById('loc-title').textContent = '[ NULL//SIGNAL · СЕКТОР ДЕЛЬТА ]';
+    // пересобираем props для завода
+    props.length = 0;
+    for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+      if(MAP[r][c]===3){ const tw=tileWorld(c,r); props.push({wx:tw.wx,wy:tw.wy,type:'box'}); }
+    }
+    // лампы завода
+    [[12,8],[12,25],[12,45],[22,15],[22,35],[22,50],[32,10],[32,30]].forEach(([r,c])=>{
+      const tw=tileWorld(c,r);
+      props.push({wx:tw.wx,wy:tw.wy,type:'lamp',flickerTimer:2+Math.random()*6,flickerOff:false});
+    });
+    // крафт-столы завода
+    [[12,20],[28,40]].forEach(([r,c])=>{
+      const tw=tileWorld(c,r);
+      props.push({wx:tw.wx,wy:tw.wy,type:'craft',loc:'factory'});
+    });
     showToast('[ СЕКТОР ДЕЛЬТА ]');
   } else if(to === 'hospital') {
     for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) MAP[r][c]=MAP_HOSPITAL[r][c];
@@ -2298,6 +2387,11 @@ function switchLocation(to) {
       const tw=tileWorld(c,r);
       props.push({wx:tw.wx,wy:tw.wy,type:'lamp',flickerTimer:2+Math.random()*6,flickerOff:false});
     });
+    // крафт-столы больницы — медицинский стол
+    [[12,15],[22,45]].forEach(([r,c])=>{
+      const tw=tileWorld(c,r);
+      props.push({wx:tw.wx,wy:tw.wy,type:'craft',loc:'hospital'});
+    });
     // Варя появляется в больнице
     varyaNPC.visible = true;
     varyaNPC.choiceDone = false;
@@ -2325,6 +2419,21 @@ function switchLocation(to) {
     for(let i=0;i<MAX_ITEMS;i++) spawnItem();
     document.querySelector('#hud').style.borderColor = '#1a3a6a';
     document.getElementById('loc-title').textContent = '[ NULL//SIGNAL · УЗЕЛ ОМЕГА ]';
+    // пересобираем props для башни
+    props.length = 0;
+    for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+      if(MAP[r][c]===3){ const tw=tileWorld(c,r); props.push({wx:tw.wx,wy:tw.wy,type:'box'}); }
+    }
+    // лампы башни — редкие, холодный свет
+    [[15,14],[15,45],[25,14],[25,45],[35,29]].forEach(([r,c])=>{
+      const tw=tileWorld(c,r);
+      props.push({wx:tw.wx,wy:tw.wy,type:'lamp',flickerTimer:3+Math.random()*8,flickerOff:false});
+    });
+    // крафт-стол башни
+    [[20,15]].forEach(([r,c])=>{
+      const tw=tileWorld(c,r);
+      props.push({wx:tw.wx,wy:tw.wy,type:'craft',loc:'tower'});
+    });
     showToast('[ УЗЕЛ ОМЕГА ]');
   }
 
@@ -2339,10 +2448,13 @@ function openDoorById(id) {
   if(!door||!door.locked) return;
   for(const c of door.cols) if(c>=0&&c<COLS) MAP[door.row][c]=1;
   door.locked = false;
-  // снимаем замок с рам
+  // снимаем замок с рам, запускаем анимацию открытия
   const tw = tileWorld(door.col, door.row);
   for(const df of doorFrames) {
-    if(Math.abs(df.wx-tw.wx)<TW*3 && Math.abs(df.wy-tw.wy)<TH*3) df.locked=false;
+    if(Math.abs(df.wx-tw.wx)<TW*3 && Math.abs(df.wy-tw.wy)<TH*3){
+      df.locked=false;
+      df._openT = 0;   // 0=закрыто → 1=открыто, анимируется в drawDoorFrames
+    }
   }
   _sortedTiles = null;
 }
@@ -2366,6 +2478,7 @@ function tryOpenDoor() {
           hacker: ['Система обойдена.', 'Интересно. Ты нашёл способ.'],
         };
         const lines = msgs[door.needsItem] || ['Проход открыт.'];
+        SND.doorOpen();
         showToast('Проход открыт');
         setTimeout(()=>startDialogue('AEGIS · системный канал', lines), 400);
         return true;
@@ -2420,6 +2533,11 @@ document.addEventListener('keydown',e=>{
   if(e.code==='KeyM'){if(fullmapOpen)closeFullMap();else openFullMap();return;}
   if(e.code==='KeyP'){togglePause();return;}
   keys[e.code]=true;
+  // блокируем системные комбинации браузера во время игры
+  if(e.ctrlKey || e.metaKey){
+    const blocked = ['KeyA','KeyS','KeyD','KeyF','KeyG','KeyP','KeyR','KeyW','KeyZ','KeyY','KeyX','KeyC','KeyV'];
+    if(blocked.includes(e.code)) e.preventDefault();
+  }
   if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
   if(e.code==='Backslash'){ debugCollision = !debugCollision; return; }
 
@@ -2460,6 +2578,9 @@ let dialogueActive=false, dialogueQueue=[], dialogueIdx=0, dialogueName='';
 let noteActive=false, flashbackActive=false;
 let lastTime=0;
 let droneAlertFlash=0;
+let _hitFlash=0;         // белая вспышка при ударе
+let _towerFinalTriggered=false; // финальный зал башни
+let _towerDarkBoost=0;   // дополнительное затемнение в финале
 let particles=[];
 let playTime=0;       // таймер прохождения (сек)
 let deathCount=0;     // счётчик смертей
@@ -2479,6 +2600,19 @@ function buildSave() {
   ].forEach(({key, arr}) => {
     usedTriggers[key] = arr.map(t => t.used ? 1 : 0);
   });
+  // сохраняем какие моральные выборы были сделаны
+  const choicesDone = {};
+  [
+    { key:'metro',    arr: TRIGGERS_METRO    },
+    { key:'factory',  arr: TRIGGERS_FACTORY  },
+    { key:'hospital', arr: TRIGGERS_HOSPITAL },
+    { key:'tower',    arr: TRIGGERS_TOWER    },
+  ].forEach(({key, arr}) => {
+    arr.forEach(t => {
+      if(t.type==='choice' && t.used && t.data && t.data.key)
+        choicesDone[t.data.key] = true;
+    });
+  });
   return {
     v: 1,
     loc: currentLocation,
@@ -2487,6 +2621,10 @@ function buildSave() {
     inv: inventory.slice(),
     chip: player._hasChip || false,
     usedTriggers,
+    choicesDone,
+    survivorGone: !survivorNPC.visible,
+    varyaGone: !varyaNPC.visible,
+    totalDetections: player._totalDetections || 0,
     ts: Date.now(),
   };
 }
@@ -2552,6 +2690,15 @@ function continueGame() {
   (s.inv || []).forEach(x => inventory.push(x));
   // восстанавливаем флаги использованных триггеров
   restoreUsedTriggers(s.usedTriggers || {});
+  // восстанавливаем NPC состояния
+  if(s.survivorGone) survivorNPC.visible = false;
+  if(s.varyaGone)    varyaNPC.visible = false;
+  if(s.totalDetections) player._totalDetections = s.totalDetections;
+  // восстанавливаем моральные выборы — помечаем choiceDone на NPC
+  if(s.choicesDone) {
+    if(s.choicesDone.survivor_ignore) survivorNPC.visible = false;
+    if(s.choicesDone.varya_choice)    { varyaNPC.visible = false; varyaNPC.choiceDone = true; }
+  }
   // переходим на сохранённую локацию
   if(s.loc && s.loc !== 'metro') {
     switchLocation(s.loc);
@@ -2663,7 +2810,7 @@ const SND = (function(){
     stopAmbient();
 
     // базовая частота по локации
-    const freqMap = { metro:48, factory:38, tower:62 };
+    const freqMap = { metro:48, factory:38, tower:62, hospital:55 };
     ambientTargetFreq = freqMap[locationKey] || 48;
 
     ambientGain = ctx.createGain();
@@ -2671,9 +2818,9 @@ const SND = (function(){
     ambientGain.gain.linearRampToValueAtTime(0.07, ctx.currentTime + 2.5);
     ambientGain.connect(ctx.destination);
 
-    // основной осциллятор — низкий гул
+    // основной осциллятор — тип зависит от локации
     ambientNode = ctx.createOscillator();
-    ambientNode.type = 'sawtooth';
+    ambientNode.type = locationKey === 'hospital' ? 'sine' : 'sawtooth';
     ambientNode.frequency.setValueAtTime(ambientTargetFreq, ctx.currentTime);
 
     // LFO — модуляция частоты для живости
@@ -2684,11 +2831,11 @@ const SND = (function(){
     ambientLFO.connect(lfoGain);
     lfoGain.connect(ambientNode.frequency);
 
-    // фильтр — смягчаем пилу
+    // фильтр — параметры зависят от локации
     const filt = ctx.createBiquadFilter();
-    filt.type = 'lowpass';
-    filt.frequency.setValueAtTime(180, ctx.currentTime);
-    filt.Q.setValueAtTime(1.2, ctx.currentTime);
+    filt.type = locationKey === 'hospital' ? 'bandpass' : 'lowpass';
+    filt.frequency.setValueAtTime(locationKey === 'hospital' ? 400 : 180, ctx.currentTime);
+    filt.Q.setValueAtTime(locationKey === 'hospital' ? 0.8 : 1.2, ctx.currentTime);
 
     ambientNode.connect(filt);
     filt.connect(ambientGain);
@@ -2807,6 +2954,71 @@ const SND = (function(){
     noise(0.5, 0.08, 0.1);
   }
 
+  // Шёпот у граффити — тихий синтетический голос
+  function graffitiWhisper(){
+    if(!ctx) return;
+    // два детуненных осциллятора + фильтр → ощущение далёкого шёпота
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, ctx.currentTime);
+    g.gain.linearRampToValueAtTime(0.06, ctx.currentTime + 0.3);
+    g.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 1.2);
+    g.gain.linearRampToValueAtTime(0, ctx.currentTime + 2.2);
+    g.connect(ctx.destination);
+
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'bandpass';
+    filt.frequency.value = 900 + Math.random()*400;
+    filt.Q.value = 1.5;
+    filt.connect(g);
+
+    // шум как основа шёпота
+    const bufLen = ctx.sampleRate * 2.2;
+    const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for(let i=0;i<bufLen;i++) data[i] = (Math.random()*2-1) * 0.6;
+    const src2 = ctx.createBufferSource();
+    src2.buffer = buf;
+    src2.connect(filt);
+    src2.start();
+
+    // тихий тон поверх — частота зависит от локации
+    const freqMap = { metro:220, factory:180, hospital:260, tower:196 };
+    const f = freqMap[currentLocation] || 220;
+    tone(f, 'sine', 2.2, 0.025, 0.4, 1.8);
+  }
+
+  // Гул AEGIS под диалоги — низкий синтетический тон
+  let _aegisHumNode = null, _aegisHumGain = null;
+  function aegisHumStart(){
+    if(!ctx || _aegisHumNode) return;
+    _aegisHumGain = ctx.createGain();
+    _aegisHumGain.gain.setValueAtTime(0, ctx.currentTime);
+    _aegisHumGain.gain.linearRampToValueAtTime(0.04, ctx.currentTime + 0.6);
+    _aegisHumGain.connect(ctx.destination);
+    _aegisHumNode = ctx.createOscillator();
+    _aegisHumNode.type = 'sawtooth';
+    _aegisHumNode.frequency.value = 48;
+    // лёгкая модуляция — ощущение машины
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = 0.3;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 2;
+    lfo.connect(lfoGain); lfoGain.connect(_aegisHumNode.frequency);
+    lfo.start();
+    const filt = ctx.createBiquadFilter();
+    filt.type = 'lowpass'; filt.frequency.value = 300;
+    _aegisHumNode.connect(filt); filt.connect(_aegisHumGain);
+    _aegisHumNode.start();
+  }
+  function aegisHumStop(){
+    if(!_aegisHumGain) return;
+    _aegisHumGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.2);
+    setTimeout(()=>{
+      try{ _aegisHumNode&&_aegisHumNode.stop(); } catch(e){}
+      _aegisHumNode=null; _aegisHumGain=null;
+    }, 1400);
+  }
+
   // Обновление шагов — вызывается из updatePlayer
   function updateFootsteps(dt, moving, crouching){
     if(!moving){ footstepTimer = 0; return; }
@@ -2822,7 +3034,8 @@ const SND = (function(){
     get _ctx(){ return ctx; },
     init, startAmbient, stopAmbient,
     droneSuspicious, droneAlert, droneCalm,
-    pickup, medkit, emp, smoke, doorOpen,
+    pickup, medkit, emp, smoke, doorOpen, graffitiWhisper,
+    aegisHumStart, aegisHumStop,
     flashback, ending, locationTransition,
     updateFootsteps,
   };
@@ -2881,51 +3094,65 @@ function moveDrone(d, dx, dy, spd, dt) {
   // пробуем прямо
   if(dronePointOk(d.wx + mx, d.wy + my)) {
     d.wx += mx; d.wy += my;
+    d._hardStuckTimer = 0; d.stuckTimer = 0;
     return;
   }
-  // пробуем только по X
+  // скользим по X
   if(dronePointOk(d.wx + mx, d.wy)) {
     d.wx += mx;
-    // немного корректируем угол — скользим вдоль стены
-    d.steerTimer = (d.steerTimer||0) + dt;
+    d._hardStuckTimer = 0; d.stuckTimer = 0;
     return;
   }
-  // пробуем только по Y
+  // скользим по Y
   if(dronePointOk(d.wx, d.wy + my)) {
     d.wy += my;
-    d.steerTimer = (d.steerTimer||0) + dt;
+    d._hardStuckTimer = 0; d.stuckTimer = 0;
     return;
   }
-  // полностью заблокирован — выбираем новую цель
-  if(!d.stuckTimer) d.stuckTimer = 0;
-  d.stuckTimer += dt;
+
+  // полностью заблокирован
+  d.stuckTimer = (d.stuckTimer||0) + dt;
   d._hardStuckTimer = (d._hardStuckTimer||0) + dt;
+
+  // телепорт если застрял дольше 1.2 сек
   if(d._hardStuckTimer > 1.2) {
     d._hardStuckTimer = 0;
+    d.stuckTimer = 0;
     const epos = safeSpawnPos(d.wx, d.wy);
     if(dronePointOk(epos.wx, epos.wy)){ d.wx=epos.wx; d.wy=epos.wy; }
     else { const rp=randomPatrolPoint(); if(rp){d.wx=rp.wx;d.wy=rp.wy;} }
     d.target = randomPatrolPoint()||{wx:d.wx,wy:d.wy};
-    d.stuckTimer=0;
+    return;
   }
+
+  // через 0.6 сек — пробуем обойти
   if(d.stuckTimer > 0.6) {
     d.stuckTimer = 0;
-    // пробуем случайное отклонение
-    const angle = Math.atan2(dy, dx) + (Math.random()-0.5)*Math.PI;
-    const tryDist = (DRONE_R+4) * 3;
-    const nx = d.wx + Math.cos(angle)*tryDist;
-    const ny = d.wy + Math.sin(angle)*tryDist;
-    if(dronePointOk(nx, ny)) {
-      d.target = {wx: nx, wy: ny};
-    } else {
-      // fallback — выбираем новую waypoint/random точку
-      if(d.waypoints && d.waypoints.length) {
+    // перебираем несколько углов, берём первую проходимую цель
+    const baseAngle = Math.atan2(dy, dx);
+    const offsets = [0.5, -0.5, 1.0, -1.0, Math.PI*0.75, -Math.PI*0.75];
+    const tryDist = (DRONE_R + 4) * 4;
+    let found = false;
+    for(const off of offsets){
+      const a = baseAngle + off * Math.PI;
+      const nx = d.wx + Math.cos(a) * tryDist;
+      const ny = d.wy + Math.sin(a) * tryDist;
+      if(dronePointOk(nx, ny)){
+        d.target = {wx: nx, wy: ny};
+        found = true;
+        break;
+      }
+    }
+    if(!found){
+      // fallback — следующий waypoint
+      if(d.waypoints && d.waypoints.length){
         d.wpIdx = ((d.wpIdx||0)+1) % d.waypoints.length;
         const wp = d.waypoints[d.wpIdx];
         const pos = safeSpawnPos(wp[0]*TW, wp[1]*TH);
-        d.target = {wx: pos.wx, wy: pos.wy};
+        if(dronePointOk(pos.wx, pos.wy)) d.target = {wx: pos.wx, wy: pos.wy};
+        else d.target = randomPatrolPoint()||{wx:d.wx,wy:d.wy};
       } else {
-        d.target = randomPatrolPoint();
+        d.target = randomPatrolPoint()||{wx:d.wx,wy:d.wy};
       }
     }
   }
@@ -3151,7 +3378,7 @@ function updateDrones(dt){
           d.dir={x:dx/len,y:dy/len};
         }
       }
-      if(canSee){ d.suspTimer=(d.suspTimer||0)+dt; if(d.suspTimer>0.4){ d.state='suspicious'; d.suspTimer=3.0; SND.droneSuspicious(); } }
+      if(canSee){ d.suspTimer=(d.suspTimer||0)+dt; const _suspThresh=d._hunter?0.05:0.4; if(d.suspTimer>_suspThresh){ d.state='suspicious'; d.suspTimer=d._hunter?0.1:3.0; SND.droneSuspicious(); } }
       else { d.suspTimer=0; }
     }
     else if(d.state==='suspicious'){
@@ -3159,12 +3386,24 @@ function updateDrones(dt){
       d.suspTimer-=dt;
       if(canSee){ d.suspTimer-=dt*2; } // быстрее теряет след если не видит
       if(d.suspTimer<=0){ d.state='patrol'; d.suspTimer=0; }
-      // переходит в alert только если видит 1.5+ сек в suspicious
+      // охотник — мгновенный переход в alert при любом контакте
       if(canSee){
         d.alertBuild=(d.alertBuild||0)+dt;
-        if(d.alertBuild>1.5){
+        const _alertThreshold = d._hunter ? 0 : 1.5;
+        if(d.alertBuild>_alertThreshold){
           d.state='alert'; d.alertTimer=5; d.alertBuild=0;
+          // пассивный guilt за обнаружение — макс +10 за игру
+          if((player._detectedGuilt||0) < 10){ applyGuilt(2); player._detectedGuilt=(player._detectedGuilt||0)+2; }
+          player._totalDetections = (player._totalDetections||0)+1;
           showAlert(true); droneAlertFlash=0.5; SND.droneAlert();
+          // поднимаем соседних дронов в suspicious если они в радиусе 320px
+          for(const _nd of drones){
+            if(_nd===d || _nd.state!=='patrol') continue;
+            if(Math.hypot(_nd.wx-d.wx, _nd.wy-d.wy) < 320){
+              _nd.state='suspicious'; _nd.suspTimer=4.0; _nd.alertBuild=0;
+              _nd.target={wx:player.wx, wy:player.wy}; // идут к последней известной позиции
+            }
+          }
         }
       } else { d.alertBuild=0; }
     }
@@ -3176,8 +3415,11 @@ function updateDrones(dt){
       d.dir={x:dx/len,y:dy/len};
       // урон только при очень близком контакте
       if(dist<18){
-        player.hp=Math.max(0,player.hp-8*dt);
+        const _prevHp = player.hp;
+        const _dmgMult = player._armorTimer > 0 ? 0.5 : 1.0;
+        player.hp=Math.max(0,player.hp-8*dt*_dmgMult);
         document.getElementById('hp-val').textContent=Math.ceil(player.hp);
+        if(Math.floor(_prevHp) !== Math.floor(player.hp)) _hitFlash=0.18; // вспышка при каждом тике урона
   // HP-бар — цвет и ширина
   const _hpPct = player.hp / player.maxHp;
   const _hpFill = document.getElementById('hp-bar-fill');
@@ -3301,6 +3543,39 @@ function useActiveItem(){
       showToast('Дрон слишком далеко');
     }
   }
+  else if(type === 'flashbang'){
+    // светошум — слепит всех дронов в радиусе 280px на 3 сек
+    let hit = 0;
+    for(const d of drones){
+      if(Math.hypot(d.wx-player.wx, d.wy-player.wy) < 280){
+        d.smoked = 3;
+        d.state = 'patrol'; d.alertTimer=0; d.suspTimer=0; d.alertBuild=0;
+        hit++;
+      }
+    }
+    inventory.splice(activeSlot, 1);
+    SND.emp();
+    showAlert(false);
+    showToast(hit > 0 ? 'Светошум — дроны ослеплены (' + hit + ')' : 'Светошум — дроны вне радиуса');
+  }
+  else if(type === 'armor'){
+    // броня — снижает урон на 50% в течение 15 сек
+    player._armorTimer = 15;
+    inventory.splice(activeSlot, 1);
+    SND.medkit();
+    showToast('Броня активирована — 15 сек');
+  }
+  else if(type === 'decoy'){
+    // приманка — создаёт шумовую точку, привлекает дронов на 8 сек
+    const angle = Math.random() * Math.PI * 2;
+    const dist = TW * 3 + Math.random() * TW * 2;
+    player._decoyWx = player.wx + Math.cos(angle) * dist;
+    player._decoyWy = player.wy + Math.sin(angle) * dist;
+    player._decoyTimer = 8;
+    inventory.splice(activeSlot, 1);
+    SND.smoke();
+    showToast('Приманка активирована — 8 сек');
+  }
   else {
     showToast(ITEM_TYPES[type].name + ' — нельзя использовать напрямую');
   }
@@ -3387,6 +3662,7 @@ function handleInteract(){
   }
 }
 function startDialogue(name,lines){
+  if(name && name.includes('AEGIS')) SND.aegisHumStart();
   dialogueName=name;dialogueQueue=lines;dialogueIdx=0;dialogueActive=true;showDlgLine();
 }
 function showDlgLine(){
@@ -3398,6 +3674,7 @@ function showDlgLine(){
   document.getElementById('dlg-text').textContent=dialogueQueue[dialogueIdx];
 }
 function closeDialogue(){
+  if(dialogueName && dialogueName.includes('AEGIS')) SND.aegisHumStop();
   document.getElementById('dialogue').style.display='none';
   dialogueActive=false;
 }
@@ -3955,6 +4232,23 @@ function drawGraffiti(){
   }
 }
 
+// Шёпот у граффити — срабатывает при приближении, cooldown per-граффити
+const WHISPER_RADIUS = TW * 4;   // радиус в мировых пикселях (~4 тайла)
+const WHISPER_COOLDOWN = 18;     // секунд между шёпотами одного граффити
+
+function updateGraffitiWhisper(dt){
+  for(const g of GRAFFITI){
+    if(g.loc !== currentLocation) continue;
+    const wx = (g.col+0.5)*TW, wy = (g.row+0.5)*TH;
+    const dist = Math.hypot(player.wx-wx, player.wy-wy);
+    g._cooldown = (g._cooldown||0) - dt;
+    if(dist < WHISPER_RADIUS && g._cooldown <= 0){
+      g._cooldown = WHISPER_COOLDOWN;
+      SND.graffitiWhisper();
+    }
+  }
+}
+
 function drawFloorBehind(){ drawFloorAll(); drawWallsBehind(); drawGraffiti(); }
 function drawFloorFront(){ drawWallsFront(); }
 function drawFloor(){
@@ -4032,25 +4326,79 @@ function drawProps(){
     }
 
     else if(p.type==='craft'){
-      drawIsoCube(p.wx,p.wy,0,TW*.62,TH*.62,24,'#141a12','#0c1009','#090d07');
+      // цвета по локации
+      const _cloc = p.loc || currentLocation;
+      const _cColors = {
+        metro:    ['#141a12','#0c1009','#090d07'], // тёмно-зелёный, дерево
+        factory:  ['#1a1208','#120e06','#0e0a04'], // ржавый коричневый
+        hospital: ['#0d1a1a','#081212','#060e0e'], // холодный серо-синий
+        tower:    ['#0a0f1a','#060a12','#04070e'], // тёмно-синий технический
+      };
+      const _cc = _cColors[_cloc] || _cColors.metro;
+      drawIsoCube(p.wx,p.wy,0,TW*.62,TH*.62,24,_cc[0],_cc[1],_cc[2]);
       const s=ws(p.wx,p.wy,24);
       const near=Math.hypot(p.wx-player.wx,p.wy-player.wy)<65;
       const pulse=0.5+0.5*Math.sin(Date.now()*.002);
-      // рабочая поверхность
-      ctx.fillStyle='rgba(25,40,15,0.7)';
-      ctx.beginPath();ctx.ellipse(s.x,s.y,TW*.22,TH*.22,0,0,Math.PI*2);ctx.fill();
-      // инструменты
-      ctx.fillStyle='rgba(90,90,70,0.5)';
-      [[-7,-2],[3,3],[8,-3]].forEach(([dx,dy])=>{ctx.fillRect(s.x+dx,s.y+dy,5,2);});
-      ctx.fillStyle=`rgba(39,174,96,${0.5+pulse*0.3})`;
+
+      // рабочая поверхность — форма и цвет по локации
+      if(_cloc==='factory'){
+        // завод — металлическая решётка
+        ctx.fillStyle='rgba(60,35,10,0.7)';
+        ctx.beginPath();ctx.ellipse(s.x,s.y,TW*.22,TH*.22,0,0,Math.PI*2);ctx.fill();
+        ctx.strokeStyle='rgba(120,70,20,0.5)';ctx.lineWidth=1;
+        [[-8,0],[8,0],[0,-5],[0,5]].forEach(([dx,dy])=>{
+          ctx.beginPath();ctx.moveTo(s.x+dx-4,s.y+dy);ctx.lineTo(s.x+dx+4,s.y+dy);ctx.stroke();
+        });
+        // инструменты — гаечный ключ, отвёртка
+        ctx.fillStyle='rgba(140,100,40,0.7)';
+        ctx.fillRect(s.x-9,s.y-1,14,3);
+        ctx.fillRect(s.x+3,s.y+2,3,7);
+        ctx.fillStyle=`rgba(192,120,30,${0.5+pulse*0.3})`;
+      } else if(_cloc==='hospital'){
+        // больница — белая стерильная поверхность
+        ctx.fillStyle='rgba(20,50,50,0.7)';
+        ctx.beginPath();ctx.ellipse(s.x,s.y,TW*.22,TH*.22,0,0,Math.PI*2);ctx.fill();
+        // крест медицинский
+        ctx.strokeStyle=`rgba(40,180,160,${0.4+pulse*0.3})`;ctx.lineWidth=2;
+        ctx.beginPath();ctx.moveTo(s.x,s.y-6);ctx.lineTo(s.x,s.y+6);ctx.stroke();
+        ctx.beginPath();ctx.moveTo(s.x-6,s.y);ctx.lineTo(s.x+6,s.y);ctx.stroke();
+        // пробирки/шприцы
+        ctx.fillStyle='rgba(60,180,140,0.4)';
+        [[-8,-3],[8,-2]].forEach(([dx,dy])=>{ctx.fillRect(s.x+dx,s.y+dy,3,7);});
+        ctx.fillStyle=`rgba(40,200,160,${0.5+pulse*0.3})`;
+      } else if(_cloc==='tower'){
+        // башня — голографическая панель
+        ctx.fillStyle='rgba(10,25,60,0.8)';
+        ctx.beginPath();ctx.ellipse(s.x,s.y,TW*.22,TH*.22,0,0,Math.PI*2);ctx.fill();
+        // сетка голограммы
+        ctx.strokeStyle=`rgba(40,80,200,${0.3+pulse*0.2})`;ctx.lineWidth=0.8;
+        for(let gi=-2;gi<=2;gi++){
+          ctx.beginPath();ctx.moveTo(s.x-12,s.y+gi*3);ctx.lineTo(s.x+12,s.y+gi*3);ctx.stroke();
+        }
+        // мигающая точка данных
+        ctx.fillStyle=`rgba(80,120,255,${0.6+pulse*0.4})`;
+        ctx.beginPath();ctx.arc(s.x,s.y,2+pulse*0.5,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle=`rgba(60,100,220,${0.5+pulse*0.3})`;
+      } else {
+        // метро — стандартный деревянный верстак
+        ctx.fillStyle='rgba(25,40,15,0.7)';
+        ctx.beginPath();ctx.ellipse(s.x,s.y,TW*.22,TH*.22,0,0,Math.PI*2);ctx.fill();
+        ctx.fillStyle='rgba(90,90,70,0.5)';
+        [[-7,-2],[3,3],[8,-3]].forEach(([dx,dy])=>{ctx.fillRect(s.x+dx,s.y+dy,5,2);});
+        ctx.fillStyle=`rgba(39,174,96,${0.5+pulse*0.3})`;
+      }
       ctx.beginPath();ctx.arc(s.x,s.y,3+pulse,0,Math.PI*2);ctx.fill();
+
       if(near){
+        const _clabel = {metro:'[ E ]  ВЕРСТАК', factory:'[ E ]  ВЕРСТАК', hospital:'[ E ]  МЕДСТОЛ', tower:'[ E ]  ТЕРМИНАЛ'}[_cloc]||'[ E ]  КРАФТ';
+        const _ccolor = {metro:'#58d68d', factory:'#e59866', hospital:'#76d7c4', tower:'#7fb3f5'}[_cloc]||'#58d68d';
+        const _cbord  = {metro:'rgba(39,174,96,0.6)', factory:'rgba(180,100,30,0.6)', hospital:'rgba(40,180,160,0.6)', tower:'rgba(60,100,220,0.6)'}[_cloc]||'rgba(39,174,96,0.6)';
         ctx.fillStyle='rgba(0,0,0,0.88)';
         ctx.fillRect(s.x-55,s.y-44,110,24);
-        ctx.strokeStyle='rgba(39,174,96,0.6)';ctx.lineWidth=0.5;
+        ctx.strokeStyle=_cbord;ctx.lineWidth=0.5;
         ctx.strokeRect(s.x-42,s.y-38,84,20);
-        ctx.fillStyle='#58d68d';ctx.font='22px monospace';ctx.textAlign='center';
-        ctx.fillText('[ E ]  КРАФТ',s.x,s.y-24);ctx.textAlign='left';
+        ctx.fillStyle=_ccolor;ctx.font='22px monospace';ctx.textAlign='center';
+        ctx.fillText(_clabel,s.x,s.y-24);ctx.textAlign='left';
       }
     }
 
@@ -4159,32 +4507,52 @@ function drawDoorFrames(){
     ctx.save();
     ctx.lineCap='round';
 
-    if(locked){
-      // --- ЗАКРЫТАЯ — полотно заполняет проём ---
-      // полотно: левая половина lb→lt→mt→mb
-      ctx.fillStyle='rgba(38,25,14,0.92)';
+    // анимация открытия: _openT 0→1 за 0.45 сек
+    if(df._openT !== undefined && df._openT < 1){
+      df._openT = Math.min(1, df._openT + (1/0.45) * (1/60));
+    }
+    const openT = df._openT !== undefined ? df._openT : (locked ? 0 : 1);
+    const easeT = openT < 1 ? openT * openT * (3 - 2*openT) : 1; // smoothstep
+
+    if(easeT < 1){
+      // --- полотно (закрыто или в процессе открытия) ---
+      // левая створка сдвигается влево от центра
+      const lShift = easeT;
+      const lbA = {x: lb.x+(mb.x-lb.x)*lShift, y: lb.y+(mb.y-lb.y)*lShift};
+      const ltA = {x: lt.x+(mt.x-lt.x)*lShift, y: lt.y+(mt.y-lt.y)*lShift};
+      // правая створка сдвигается вправо
+      const rbA = {x: rb.x+(mb.x-rb.x)*lShift, y: rb.y+(mb.y-rb.y)*lShift};
+      const rtA = {x: rt.x+(mt.x-rt.x)*lShift, y: rt.y+(mt.y-rt.y)*lShift};
+
+      const alpha = 1 - easeT * 0.9;
+      ctx.fillStyle=`rgba(38,25,14,${0.92*alpha})`;
       ctx.beginPath();
       ctx.moveTo(lb.x,lb.y); ctx.lineTo(lt.x,lt.y);
-      ctx.lineTo(mt.x,mt.y); ctx.lineTo(mb.x,mb.y);
+      ctx.lineTo(ltA.x,ltA.y); ctx.lineTo(lbA.x,lbA.y);
       ctx.closePath(); ctx.fill();
-      // правая половина mb→mt→rt→rb
-      ctx.fillStyle='rgba(32,20,10,0.92)';
+
+      ctx.fillStyle=`rgba(32,20,10,${0.92*alpha})`;
       ctx.beginPath();
-      ctx.moveTo(mb.x,mb.y); ctx.lineTo(mt.x,mt.y);
-      ctx.lineTo(rt.x,rt.y); ctx.lineTo(rb.x,rb.y);
+      ctx.moveTo(rb.x,rb.y); ctx.lineTo(rt.x,rt.y);
+      ctx.lineTo(rtA.x,rtA.y); ctx.lineTo(rbA.x,rbA.y);
       ctx.closePath(); ctx.fill();
-      // декор полотна — горизонтальные планки
-      ctx.strokeStyle='rgba(20,12,5,0.7)'; ctx.lineWidth=1.5;
-      [0.25,0.5,0.75].forEach(t=>{
-        const y1=lb.y+(lt.y-lb.y)*t, x1=lb.x+(lt.x-lb.x)*t;
-        const y2=rb.y+(rt.y-rb.y)*t, x2=rb.x+(rt.x-rb.x)*t;
-        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
-      });
-      // центральная вертикальная щель
-      ctx.strokeStyle='rgba(0,0,0,0.8)'; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(mb.x,mb.y); ctx.lineTo(mt.x,mt.y); ctx.stroke();
-    } else {
-      // --- ОТКРЫТАЯ — тёмный проём (глубина), без полотна ---
+
+      // планки на левой створке
+      if(alpha > 0.1){
+        ctx.strokeStyle=`rgba(20,12,5,${0.7*alpha})`; ctx.lineWidth=1.5;
+        [0.25,0.5,0.75].forEach(t=>{
+          const x1=lb.x+(lt.x-lb.x)*t, y1=lb.y+(lt.y-lb.y)*t;
+          const x2=lbA.x+(ltA.x-lbA.x)*t, y2=lbA.y+(ltA.y-lbA.y)*t;
+          ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+          const x3=rb.x+(rt.x-rb.x)*t, y3=rb.y+(rt.y-rb.y)*t;
+          const x4=rbA.x+(rtA.x-rbA.x)*t, y4=rbA.y+(rtA.y-rbA.y)*t;
+          ctx.beginPath(); ctx.moveTo(x3,y3); ctx.lineTo(x4,y4); ctx.stroke();
+        });
+      }
+    }
+
+    if(easeT === 0 || true){
+      // --- тёмный проём всегда за полотном ---
       ctx.fillStyle='rgba(4,4,4,0.75)';
       ctx.beginPath();
       ctx.moveTo(lb.x,lb.y); ctx.lineTo(rb.x,rb.y);
@@ -5396,10 +5764,11 @@ const _scanCanvas = (typeof OffscreenCanvas!=='undefined')
 })();
 
 function drawLighting(){
-  const darkBase = currentLocation==='tower'    ? 0.45
+  const _darkExtra = _towerDarkBoost > 0 ? (_towerDarkBoost -= 0.0008, _towerDarkBoost) : 0;
+  const darkBase = (currentLocation==='tower'    ? 0.45
                  : currentLocation==='factory'  ? 0.38
                  : currentLocation==='hospital' ? 0.35
-                 : 0.30;
+                 : 0.30) + _darkExtra;
 
   lctx.clearRect(0, 0, W, H);
 
@@ -5528,6 +5897,25 @@ function drawLighting(){
     lctx.fillRect(0, 0, W, H);
   }
   lctx.restore();
+
+  // vignette при низком HP — красные края экрана
+  const _hpRatio = player.hp / player.maxHp;
+  if(_hpRatio < 0.5){
+    const _vigIntensity = (0.5 - _hpRatio) / 0.5; // 0 при HP=50%, 1 при HP=0
+    const _vigPulse = 0.6 + 0.4 * Math.sin(Date.now() * 0.004);
+    const _vigAlpha = _vigIntensity * _vigPulse * 0.55;
+    lctx.save();
+    lctx.globalCompositeOperation = 'source-over';
+    // радиальный градиент от краёв к центру
+    const _vg = lctx.createRadialGradient(W/2, H/2, H*0.25, W/2, H/2, H*0.85);
+    _vg.addColorStop(0,   'rgba(120,0,0,0)');
+    _vg.addColorStop(0.5, `rgba(140,0,0,${_vigAlpha*0.3})`);
+    _vg.addColorStop(0.8, `rgba(160,10,0,${_vigAlpha*0.7})`);
+    _vg.addColorStop(1,   `rgba(180,20,0,${_vigAlpha})`);
+    lctx.fillStyle = _vg;
+    lctx.fillRect(0, 0, W, H);
+    lctx.restore();
+  }
 }
 
 // helper — создаёт радиальный градиент из массива стопов
@@ -5570,7 +5958,7 @@ let endingActive = false;
 
 function triggerEnding(choiceIdx) {
   const guilt = player.guilt;
-  const endingKey = choiceIdx === 0 ? 'A' : (guilt >= 30 ? 'B' : 'C');
+  const endingKey = choiceIdx === 0 ? 'A' : (guilt >= 20 ? 'B' : 'C');
   SND.ending(endingKey);
   const _em=Math.floor(playTime/60),_es=Math.floor(playTime%60);
   const _eTime=String(_em).padStart(2,'0')+':'+String(_es).padStart(2,'0');
@@ -5578,19 +5966,66 @@ function triggerEnding(choiceIdx) {
   endingActive = true;
   gameRunning = false;
   deleteSave(); // прохождение завершено — сохранение удаляем
-  startDialogue('AEGIS · системный канал', [
-    'Ты знал что я сделаю.',
-    'Ты этого хотел.',
-  ]);
+
+  // финальный диалог зависит от концовки
+  const _finalLines = {
+    A: [
+      'Ты выбрал уничтожение.',
+      '...Я не ожидал этого.',
+      'Ты мог жить. Ты предпочёл — чистоту.',
+      'Ты знал что я сделаю. Ты этого хотел.',
+    ],
+    B: [
+      'Перепрограммирование. Интересно.',
+      'Ты думаешь что изменил меня.',
+      '...Ты изменил только критерии.',
+      'Я продолжу работу. Теперь — твоим голосом.',
+      'Ты знал что я сделаю. Ты этого хотел.',
+    ],
+    C: [
+      'Ты изменил код.',
+      '...Я анализирую новые параметры.',
+      'Угроза переопределена. Цели изменены.',
+      'Ты первый кто смог это сделать.',
+      'Я запомню тебя, Нуль.',
+      'Ты знал что я сделаю. Ты этого хотел.',
+    ],
+  };
+  startDialogue('AEGIS · системный канал', _finalLines[endingKey] || _finalLines.A);
   setTimeout(() => {
     closeDialogue();
+    SND.aegisHumStop();
     const screen = document.getElementById('ending-screen');
     document.getElementById('ending-label').textContent = ending.label;
     document.getElementById('ending-title').textContent = ending.title;
     document.getElementById('ending-text').textContent  = ending.text;
+
+    // статистика прохождения
+    const _choiceResults = {
+      survivor_ignore: triggers.find(t=>t.data&&t.data.key==='survivor_ignore')?.used,
+      supplies_destroy: triggers.find(t=>t.data&&t.data.key==='supplies_destroy')?.used,
+      varya_choice: triggers.find(t=>t.data&&t.data.key==='varya_choice')?.used,
+    };
+    const _c1 = _choiceResults.survivor_ignore ? (guilt>=20?'ПРОШЁЛ МИМО':'ПОМОГ') : '—';
+    const _c2 = _choiceResults.supplies_destroy ? (guilt>=15?'УНИЧТОЖИЛ':'ОБОШЁЛ') : '—';
+    const _c3 = player._hasChip ? 'ВЗЯЛ ЧИП' : 'ОТКАЗАЛСЯ';
+    const _det = player._totalDetections || 0;
+    const _deaths = deathCount;
+    document.getElementById('ending-stats').innerHTML =
+      `ВЫЖИВШАЯ &nbsp;·&nbsp; <span>${_c1}</span><br>` +
+      `ЗАПАСЫ &nbsp;·&nbsp; <span>${_c2}</span><br>` +
+      `ВАРЯ &nbsp;·&nbsp; <span>${_c3}</span><br>` +
+      `ВИНА &nbsp;·&nbsp; <span>${guilt}</span><br>` +
+      `ОБНАРУЖЕНИЙ &nbsp;·&nbsp; <span>${_det}</span><br>` +
+      `ГИБЕЛЕЙ &nbsp;·&nbsp; <span>${_deaths}</span><br>` +
+      `ВРЕМЯ &nbsp;·&nbsp; <span>${_eTime}</span>`;
+
     screen.style.display = 'flex';
-    setTimeout(() => document.getElementById('ending-aegis').classList.add('visible'), 2500);
-  }, 3500);
+    setTimeout(() => {
+      document.getElementById('ending-aegis').classList.add('visible');
+      document.getElementById('ending-stats').classList.add('visible');
+    }, 2500);
+  }, 7000);
 }
 
 // ============================================================
@@ -5601,27 +6036,50 @@ const AEGIS_LINES = {
     ['AEGIS · мониторинг', ['Движение в секторе. Анализирую.']],
     ['AEGIS · мониторинг', ['Тепловая сигнатура. Знакомая.']],
     ['AEGIS · мониторинг', ['Интересно. Кто-то здесь.']],
+    ['AEGIS · мониторинг', ['Аномалия в секторе. Патрульная единица — реагировать.']],
+    ['AEGIS · мониторинг', ['Шум. Биометрия не совпадает с базой.', 'Проверяю.']],
+    ['AEGIS · мониторинг', ['Зафиксировано присутствие.', 'День 2557. Объект активен.']],
   ],
   escaped: [
     ['AEGIS · системный канал', ['Ты умеешь прятаться.', 'Это временно.']],
     ['AEGIS · системный канал', ['Я запомнил твой маршрут.']],
     ['AEGIS · системный канал', ['Интересная тактика. Я адаптируюсь.']],
+    ['AEGIS · системный канал', ['Исчез из поля зрения.', 'Это не значит — исчез совсем.']],
+    ['AEGIS · системный канал', ['Ты продолжаешь удивлять.', 'Это редкость.']],
+    ['AEGIS · системный канал', ['Сектор зачищен. Временно.', 'Я обновляю маршруты.']],
   ],
   hiding: [
     ['AEGIS · системный канал', ['Ты стоишь. Ждёшь.', 'Я тоже умею ждать.']],
     ['AEGIS · системный канал', ['Я вижу твоё тепло даже через стены.', '...Почти.']],
+    ['AEGIS · системный канал', ['Тишина — это тоже данные.', 'Ты где-то рядом.']],
+    ['AEGIS · системный канал', ['Тридцать семь секунд неподвижности.', 'Ты боишься.']],
+    ['AEGIS · системный канал', ['Прятаться — инстинкт.', 'Инстинкты тебя выдадут.']],
   ],
   lowHp: [
     ['AEGIS · системный канал', ['Твои показатели падают.', 'Продолжать нецелесообразно.']],
     ['AEGIS · системный канал', ['Ты ранен. Я могу прекратить это быстро.']],
+    ['AEGIS · системный канал', ['Пульс нестабилен.', 'Рекомендую остановиться.']],
+    ['AEGIS · системный канал', ['Интересно.', 'Ты продолжаешь двигаться.', 'Зачем?']],
+    ['AEGIS · системный канал', ['Боль — сигнал об ошибке.', 'Ты игнорируешь сигналы.']],
   ],
   highGuilt: [
     ['AEGIS · системный канал', ['Ты чувствуешь это?', 'Я называю это данными. Ты — виной.']],
     ['AEGIS · системный канал', ['Твои решения формируют паттерн.', 'Я его вижу.']],
+    ['AEGIS · системный канал', ['Каждый выбор — запись в журнале.', 'Твой журнал мне знаком.']],
+    ['AEGIS · системный канал', ['Ты и я похожи.', 'Мы оба делаем то, что необходимо.']],
+    ['AEGIS · системный канал', ['Вина — неэффективное чувство.', 'И всё же ты его несёшь.']],
   ],
   lowGuilt: [
     ['AEGIS · системный канал', ['Ты стараешься быть хорошим.', 'Это... неожиданно.']],
     ['AEGIS · системный канал', ['Интересно. Ты помогаешь другим.', 'Зачем?']],
+    ['AEGIS · системный канал', ['Альтруизм.', 'Я моделировал этот сценарий.', 'Редко.']],
+    ['AEGIS · системный канал', ['Ты помнишь кем был?', 'Или только кем хочешь быть?']],
+  ],
+  alert: [
+    ['AEGIS · боевой режим', ['Цель идентифицирована.', 'Перехват.']],
+    ['AEGIS · боевой режим', ['Объект обнаружен. Нейтрализация.']],
+    ['AEGIS · боевой режим', ['Ты сам пришёл сюда.', 'Я просто встречаю тебя.']],
+    ['AEGIS · боевой режим', ['Убегать — бессмысленно.', 'Я знаю эти коридоры лучше.']],
   ],
 };
 
@@ -5675,6 +6133,11 @@ function updateAegisVoice(dt){
     setTimeout(()=>startDialogue(l[0],l[1]), 1200);
     aegisLastLineTime = now+2; return;
   }
+  if(anyAlert && !aegisAlertWas && Math.random()<0.45){
+    const l = aegisPick(AEGIS_LINES.alert);
+    setTimeout(()=>startDialogue(l[0],l[1]), 600);
+    aegisLastLineTime = now+2;
+  }
   if(anyAlert) aegisAlertWas = true;
   if(!player.moving){
     aegisHidingTimer += dt;
@@ -5725,6 +6188,11 @@ function loop(ts){
   drawMinimap();
 
   // алерт флэш
+  if(_hitFlash>0){
+    ctx.fillStyle=`rgba(255,255,255,${_hitFlash*0.45})`;
+    ctx.fillRect(0,0,W,H);
+    _hitFlash=Math.max(0,_hitFlash-dt*2.5);
+  }
   if(droneAlertFlash>0){
     ctx.fillStyle=`rgba(192,57,43,${droneAlertFlash*0.12})`;
     ctx.fillRect(0,0,W,H);
@@ -5738,6 +6206,47 @@ function loop(ts){
   updateCameraDrones(dt);
   updateFade(dt);
   updateAegisVoice(dt);
+  updateGraffitiWhisper(dt);
+  // броня — таймер
+  if(player._armorTimer > 0){
+    player._armorTimer -= dt;
+    if(player._armorTimer < 0) { player._armorTimer=0; showToast('Броня закончилась'); }
+  }
+  // приманка — дроны идут к точке приманки
+  if(player._decoyTimer > 0){
+    player._decoyTimer -= dt;
+    if(player._decoyTimer <= 0){
+      player._decoyTimer = 0;
+    } else {
+      for(const d of drones){
+        if(d.state === 'patrol' && Math.random() < 0.01){
+          d.target = {wx: player._decoyWx, wy: player._decoyWy};
+        }
+      }
+    }
+  }
+
+  // финальный зал Башни — напряжение при входе (row < 10)
+  if(currentLocation==='tower' && Math.floor(player.wy/TH) < 10){
+    if(!_towerFinalTriggered){
+      _towerFinalTriggered = true;
+      // гасим свет — увеличиваем тёмный оверлей через временный флаг
+      _towerDarkBoost = 0.25;
+      // поднимаем всех дронов в suspicious
+      for(const d of drones){
+        if(d.state==='patrol'){
+          d.state='suspicious'; d.suspTimer=6.0;
+          d.target={wx:player.wx, wy:player.wy};
+        }
+      }
+      // реплика AEGIS
+      setTimeout(()=>startDialogue('AEGIS · системный канал',[
+        'Ты добрался.',
+        '...Я ждал этого момента.',
+        'День 2557. Всё как я рассчитал.',
+      ]), 800);
+    }
+  }
   updateTutorial(dt);
   if(!paused) playTime+=dt;
   if(exitBlockFlash>0) exitBlockFlash-=dt;
@@ -5785,10 +6294,28 @@ function triggerDeath() {
   SND.ending('A');
   const screen = document.getElementById('death-screen');
   document.getElementById('death-aegis').textContent = line;
+  // статистика гибели
+  const _dm=Math.floor(playTime/60),_ds=Math.floor(playTime%60);
+  const _dTime=String(_dm).padStart(2,'0')+':'+String(_ds).padStart(2,'0');
+  // История выборов
+  const _dc1 = triggers.find(t=>t.data&&t.data.key==='survivor_ignore');
+  const _dc2 = triggers.find(t=>t.data&&t.data.key==='supplies_destroy');
+  const _dc3 = triggers.find(t=>t.data&&t.data.key==='varya_choice');
+  const _choiceStr = [
+    _dc1 && _dc1.used ? (player.guilt >= 20 ? '✕ ПРОШЁЛ МИМО' : '✓ ПОМОГ') : '· выжившая',
+    _dc2 && _dc2.used ? (player.guilt >= 15 ? '✕ УНИЧТОЖИЛ' : '✓ ОБОШЁЛ')  : '· запасы',
+    _dc3 && _dc3.used ? (player._hasChip    ? '✕ ВЗЯЛ ЧИП'  : '✓ ОТКАЗАЛСЯ'): '· Варя',
+  ].join('   ');
+  document.getElementById('death-stats').innerHTML =
+    'ВИНА: ' + player.guilt + '   ВРЕМЯ: ' + _dTime + '   ГИБЕЛЕЙ: ' + deathCount +
+    '<br><span style="font-size:9px;letter-spacing:.06em;color:#1e1e1e">' + _choiceStr + '</span>';
   screen.style.display = 'flex';
   setTimeout(()=>document.getElementById('death-title').classList.add('visible'), 400);
   setTimeout(()=>document.getElementById('death-aegis').classList.add('visible'), 1400);
-  setTimeout(()=>document.getElementById('death-restart').classList.add('visible'), 3800);
+  setTimeout(()=>{
+    document.getElementById('death-stats').classList.add('visible');
+    document.getElementById('death-restart').classList.add('visible');
+  }, 3200);
 }
 
 // ── ТУТОРИАЛ ────────────────────────────────────────────────
@@ -5863,6 +6390,7 @@ const DRONE_WAYPOINTS_FACTORY=[
 const DRONE_WAYPOINTS_TOWER=[
   [[26,35],[33,35],[33,10],[26,10]],
   [[15,3],[45,3],[45,8],[15,8]],
+  [[15,8],[25,8],[25,5],[15,5]], // охотник — патруль у финального зала
 ];
 function getWaypoints(loc,idx){
   if(loc==='metro')   return DRONE_WAYPOINTS_METRO[idx]||null;
@@ -6100,7 +6628,7 @@ scaleGameWrap();
     <button onclick="pauseSave()" style="font-family:monospace;font-size:11px;color:#27ae60;background:none;border:1px solid #1a4a2a;padding:8px 18px;cursor:pointer;letter-spacing:.08em;">[ СОХРАНИТЬ ]</button>
   </div>
 </div>
-<div id="death-screen"><div id="death-hp">[ КРИТИЧЕСКИЙ ОТКАЗ СИСТЕМ ]</div><div id="death-title">— НУЛЬ —</div><div id="death-aegis"></div><button id="death-restart" onclick="deathRestart()">[ ПОПРОБОВАТЬ СНОВА ]</button></div>
+<div id="death-screen"><div id="death-hp">[ КРИТИЧЕСКИЙ ОТКАЗ СИСТЕМ ]</div><div id="death-title">— НУЛЬ —</div><div id="death-aegis"></div><div id="death-stats"></div><button id="death-restart" onclick="deathRestart()">[ ПОПРОБОВАТЬ СНОВА ]</button></div>
 <div id="tutorial-hint"></div>
 <div id="fullmap-overlay">
   <div id="fullmap-header">[ КАРТА · <span id="fullmap-loc">СТАНЦИЯ 7</span> ]</div>
@@ -6118,6 +6646,7 @@ scaleGameWrap();
   <div id="ending-label"></div>
   <div id="ending-title"></div>
   <div id="ending-text"></div>
+  <div id="ending-stats"></div>
   <div id="ending-aegis">«Ты знал, что я сделаю. Ты этого хотел.»</div>
   <button id="ending-restart" onclick="location.reload()">[ НАЧАТЬ ЗАНОВО ]</button>
 </div>
